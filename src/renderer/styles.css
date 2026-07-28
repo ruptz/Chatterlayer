@@ -1,0 +1,988 @@
+/* Audio-desk model — labelled sections, a status indicator, and a channel list
+   where each speaker is a strip you switch in or out of the mix — executed
+   flat: hairline borders and spacing carry the structure.
+
+   Colour is rationed. Chrome is monochrome; colour appears only where it means
+   something, i.e. a speaker's caption colour and connection state. */
+
+:root {
+  --bg: #0a0b0d;
+  --surface: #111316;
+  --surface-2: #0d0e10;
+  --raised: rgba(255, 255, 255, 0.03);
+
+  --border: rgba(255, 255, 255, 0.07);
+  --border-strong: rgba(255, 255, 255, 0.12);
+
+  --text: #f2f3f5;
+  --text-2: #a1a7b0;
+  --text-3: #6b7280;
+
+  --live: #3ecf8e; /* switched on / passing audio */
+  --onair: #ff5a52; /* connected and captioning to stream */
+  --warn: #f5a623; /* connecting, recoverable fault */
+
+  --font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system,
+    "Helvetica Neue", sans-serif;
+  --font-display: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  --mono: "Cascadia Mono", ui-monospace, Consolas, monospace;
+
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 12px;
+
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13.5px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ------------------------------------------------------------------ top --- */
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 14px 24px;
+  background: rgba(10, 11, 13, 0.82);
+  backdrop-filter: saturate(160%) blur(12px);
+  -webkit-backdrop-filter: saturate(160%) blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+
+/* Three stacked bars — captions, layered. Monochrome on purpose: the palette
+   is reserved for speaker identity. */
+.logo {
+  width: 30px;
+  height: 30px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border-strong);
+  background: var(--raised);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 3px;
+  flex: none;
+}
+
+.logo i {
+  display: block;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--text);
+}
+.logo i:nth-child(1) {
+  width: 14px;
+  opacity: 0.95;
+}
+.logo i:nth-child(2) {
+  width: 9px;
+  opacity: 0.6;
+}
+.logo i:nth-child(3) {
+  width: 12px;
+  opacity: 0.35;
+}
+
+.brand-text strong {
+  display: block;
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.012em;
+  line-height: 1.25;
+}
+
+.brand-text small {
+  display: block;
+  font-size: 12px;
+  color: var(--text-3);
+  line-height: 1.25;
+}
+
+/* --- status pill: the tally, minimised to a dot and a word --------------- */
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 13px 0 11px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-2);
+  white-space: nowrap;
+  transition: color 0.18s var(--ease), border-color 0.18s var(--ease);
+}
+
+.status .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #3a3f46;
+  flex: none;
+  transition: background 0.18s var(--ease), box-shadow 0.18s var(--ease);
+}
+
+.status[data-state="linking"] {
+  color: var(--warn);
+  border-color: rgba(245, 166, 35, 0.28);
+}
+.status[data-state="linking"] .dot {
+  background: var(--warn);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+.status[data-state="onair"] {
+  color: var(--onair);
+  border-color: rgba(255, 90, 82, 0.3);
+}
+.status[data-state="onair"] .dot {
+  background: var(--onair);
+  box-shadow: 0 0 0 3px rgba(255, 90, 82, 0.16);
+}
+
+.status[data-state="fault"] {
+  color: var(--warn);
+  border-color: rgba(245, 166, 35, 0.32);
+}
+.status[data-state="fault"] .dot {
+  background: var(--warn);
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* ----------------------------------------------------------------- main --- */
+
+main {
+  flex: 1;
+  width: 100%;
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 28px 24px 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+}
+
+.card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 48px;
+  padding: 0 16px 0 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.card-head h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: -0.006em;
+}
+
+.card-head .meta {
+  font-size: 12px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  font-family: var(--mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card-body {
+  padding: 20px;
+}
+
+/* Intrinsic sizing rather than width breakpoints: Windows DPI scaling means a
+   1120px window is only ~747 CSS px at 150%, which would collapse a hard
+   760px breakpoint and ship the app in its narrow layout by default. */
+.grid-2 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(272px, 1fr));
+  gap: 18px;
+}
+
+.grid-3 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
+  gap: 20px;
+  margin-top: 20px;
+}
+
+/* ---------------------------------------------------------------- forms --- */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+
+.label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-2);
+}
+
+.label em {
+  font-style: normal;
+  font-family: var(--mono);
+  color: var(--text);
+  margin-left: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.label.inline {
+  flex: none;
+}
+
+.help {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+.help.spaced {
+  margin-bottom: 14px;
+}
+
+.input-row {
+  display: flex;
+  gap: 7px;
+}
+
+input[type="text"],
+input[type="password"],
+input[type="number"] {
+  width: 100%;
+  min-width: 0;
+  height: 38px;
+  padding: 0 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 13px;
+  transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
+}
+
+input::placeholder {
+  color: #545a63;
+  font-family: var(--font);
+}
+
+input[type="text"]:focus-visible,
+input[type="password"]:focus-visible,
+input[type="number"]:focus-visible {
+  outline: none;
+  border-color: rgba(255, 255, 255, 0.3);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.06);
+}
+
+input.narrow {
+  width: 92px;
+}
+
+.model-field {
+  margin-top: 18px;
+}
+
+select {
+  width: 100%;
+  height: 38px;
+  padding: 0 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
+}
+
+select:focus-visible {
+  outline: none;
+  border-color: rgba(255, 255, 255, 0.3);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.06);
+}
+
+select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* The native dark popup is jarring against the panel; match it. */
+select option {
+  background: var(--surface);
+  color: var(--text);
+}
+
+/* --- speech model catalogue --------------------------------------------- */
+
+.models {
+  list-style: none;
+  margin: 14px 0 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+
+.models[hidden] {
+  display: none;
+}
+
+.model-row {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 13px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.model-row:last-child {
+  border-bottom: none;
+}
+
+.model-row.installed {
+  background: rgba(62, 207, 142, 0.04);
+}
+
+.model-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.model-info strong {
+  display: block;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.model-info small {
+  display: block;
+  margin-top: 2px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.model-info p {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--text-2);
+  max-width: 62ch;
+}
+
+.pill {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(62, 207, 142, 0.14);
+  border: 1px solid rgba(62, 207, 142, 0.3);
+  color: var(--live);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  vertical-align: 1px;
+}
+
+.model-action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.installed-tag {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--live);
+}
+
+/* Download progress, drawn as a hairline along the bottom of the row. */
+.model-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: transparent;
+  pointer-events: none;
+}
+
+.model-bar i {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: var(--live);
+  transition: width 0.2s linear;
+}
+
+/* -------------------------------------------------------------- buttons --- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 38px;
+  padding: 0 15px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease),
+    opacity 0.15s var(--ease);
+}
+
+.btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.14);
+}
+
+.btn-primary {
+  background: #fff;
+  border-color: #fff;
+  color: #0a0b0d;
+  font-weight: 600;
+}
+.btn-primary:hover:not(:disabled) {
+  background: #e6e8ea;
+  border-color: #e6e8ea;
+}
+
+.btn-danger {
+  color: var(--onair);
+  border-color: rgba(255, 90, 82, 0.28);
+}
+.btn-danger:hover:not(:disabled) {
+  background: rgba(255, 90, 82, 0.08);
+}
+
+.btn-ghost {
+  border-color: transparent;
+  color: var(--text-2);
+}
+
+.btn-sm {
+  height: 32px;
+  padding: 0 11px;
+  font-size: 12.5px;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 20px;
+  flex-wrap: wrap;
+}
+
+.actions.bordered {
+  margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+
+.spacer {
+  flex: 1;
+}
+
+/* ------------------------------------------------------- channel rows --- */
+
+.rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+
+.row {
+  --ch: #3a3f46;
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--border);
+  transition: background 0.15s var(--ease);
+}
+
+.row:last-child {
+  border-bottom: none;
+}
+
+.row:hover {
+  background: rgba(255, 255, 255, 0.018);
+}
+
+.row.live {
+  background: rgba(255, 255, 255, 0.026);
+}
+
+/* Speaker indicator. The halo ring is the whole treatment — no glow stack. */
+.row .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  background: #2a2e34;
+  transition: background 0.18s var(--ease), box-shadow 0.18s var(--ease);
+}
+
+.row.live .dot {
+  background: var(--ch);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ch) 20%, transparent);
+}
+
+.row.speaking .dot {
+  animation: ping 0.55s var(--ease);
+}
+
+@keyframes ping {
+  0% {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--ch) 20%, transparent);
+  }
+  45% {
+    box-shadow: 0 0 0 7px color-mix(in srgb, var(--ch) 26%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--ch) 20%, transparent);
+  }
+}
+
+.row .who {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Reads as plain text until you interact with it — no button or dialog for a
+   one-word change. Scoped through .row .who to outrank the base input rule. */
+.row .who .alias {
+  display: block;
+  width: 100%;
+  height: auto;
+  padding: 2px 6px;
+  margin: 0 0 0 -6px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  font-family: var(--font);
+  font-size: 13.5px;
+  font-weight: 550;
+  color: var(--text-2);
+  text-overflow: ellipsis;
+  transition: color 0.15s var(--ease), background 0.15s var(--ease),
+    border-color 0.15s var(--ease);
+}
+
+.row.live .who .alias {
+  color: var(--text);
+}
+
+.row .who .alias::placeholder {
+  color: var(--text-3);
+  font-family: var(--font);
+}
+
+.row:hover .who .alias {
+  border-color: var(--border);
+}
+
+.row .who .alias:focus,
+.row .who .alias:focus-visible {
+  outline: none;
+  color: var(--text);
+  background: var(--surface-2);
+  border-color: rgba(255, 255, 255, 0.3);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.06);
+}
+
+.row .who small {
+  display: block;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row .badge {
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--text-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 1px 6px;
+  flex: none;
+}
+
+/* Colour chip: a control, not an indicator — the dot already carries identity. */
+input[type="color"] {
+  width: 26px;
+  height: 26px;
+  padding: 3px;
+  flex: none;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+
+input[type="color"]::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+input[type="color"]::-webkit-color-swatch {
+  border: none;
+  border-radius: 3px;
+}
+input[type="color"]:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.12);
+}
+
+/* --- switch -------------------------------------------------------------- */
+
+.switch {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  flex: none;
+}
+
+.switch input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+  z-index: 2;
+}
+
+.switch .track {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: #2a2e34;
+  transition: background 0.18s var(--ease);
+}
+
+.switch .knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+  transition: transform 0.18s var(--ease);
+  pointer-events: none;
+}
+
+.switch input:checked ~ .track {
+  background: var(--live);
+}
+
+.switch input:checked ~ .knob {
+  transform: translateX(16px);
+}
+
+.switch input:focus-visible ~ .track {
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.14);
+}
+
+/* ------------------------------------------------------------- checks --- */
+
+.checks {
+  display: flex;
+  gap: 22px;
+  margin-top: 18px;
+  flex-wrap: wrap;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--live);
+  cursor: pointer;
+}
+
+input[type="checkbox"]:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.14);
+  border-radius: 3px;
+}
+
+/* ------------------------------------------------------------ sliders --- */
+
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 16px;
+  background: transparent;
+  cursor: pointer;
+}
+
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: #22252a;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  transition: transform 0.15s var(--ease);
+}
+
+input[type="range"]:hover::-webkit-slider-thumb {
+  transform: scale(1.12);
+}
+
+input[type="range"]:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.16);
+}
+
+/* ------------------------------------------------------------- output --- */
+
+.url {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 9px 9px 13px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+
+.url .label {
+  flex: none;
+}
+
+.url code {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------ monitor --- */
+
+/* Fixed height, not min/max: a growing pane reflows the document as captions
+   arrive, and Chromium's scroll anchoring then shifts the page under your
+   cursor mid-stream. Worth the empty space when idle. */
+.monitor {
+  height: 196px;
+  overflow-y: auto;
+  overflow-anchor: none;
+  display: flex;
+  flex-direction: column;
+}
+
+.line {
+  /* Fallback lives here, not on `.line b` — a declaration on the child would
+     beat the inline `--ch` the renderer sets on this element. */
+  --ch: var(--text-2);
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 9px 2px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13.5px;
+}
+
+.line:last-child {
+  border-bottom: none;
+}
+
+.line.partial {
+  color: var(--text-2);
+}
+
+.line b {
+  flex: none;
+  color: var(--ch);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.empty {
+  margin: auto;
+  padding: 22px 8px;
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--text-3);
+}
+
+.rows .empty {
+  margin: 0;
+}
+
+/* ---------------------------------------------------------------- log --- */
+
+.log {
+  margin: 0;
+  height: 152px; /* stable for the same reason as .monitor */
+  overflow-y: auto;
+  overflow-anchor: none;
+  padding: 12px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--text-3);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.log .err {
+  color: var(--onair);
+}
+.log .warn {
+  color: var(--warn);
+}
+
+/* ------------------------------------------------------------- credit --- */
+
+.credit {
+  padding: 0 24px 26px;
+  text-align: center;
+  font-size: 12px;
+  color: #4e545c;
+}
+
+.credit .heart {
+  color: var(--onair);
+  opacity: 0.75;
+  margin: 0 1px;
+}
+
+/* --------------------------------------------------------- scrollbars --- */
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.18);
+  background-clip: content-box;
+}
+
+/* --------------------------------------------------------- responsive --- */
+
+@media (max-width: 520px) {
+  .row {
+    flex-wrap: wrap;
+  }
+  .row .who {
+    order: -1;
+    flex-basis: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

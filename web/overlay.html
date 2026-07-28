@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Chatterlayer Overlay</title>
+    <style>
+      /* Chatterlayer - OBS browser source overlay
+         Background MUST stay fully transparent so OBS composites it over the
+         scene. Never set an opaque background on html/body. */
+
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+        font-family: "Segoe UI", Inter, system-ui, -apple-system, sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      #stage {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-end; /* newest caption sits at the bottom */
+        align-items: flex-start;
+        gap: 8px;
+        padding: 24px;
+        box-sizing: border-box;
+      }
+
+      .caption {
+        --color: #4ecdc4;
+        max-width: 92%;
+        padding: 10px 16px;
+        border-radius: 10px;
+        border-left: 5px solid var(--color);
+        background: rgba(8, 10, 14, 0.72);
+        /* Blur keeps text legible over busy gameplay without going fully opaque. */
+        backdrop-filter: blur(6px);
+        -webkit-backdrop-filter: blur(6px);
+        color: #fff;
+        font-size: var(--size, 30px);
+        line-height: 1.32;
+        /* Double shadow: a tight dark halo for contrast on light scenes, plus a
+           soft drop for depth. */
+        text-shadow: 0 0 4px rgba(0, 0, 0, 0.95), 0 2px 6px rgba(0, 0, 0, 0.65);
+        box-shadow: 0 6px 22px rgba(0, 0, 0, 0.4);
+        animation: rise 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+        transition: opacity 0.45s ease, transform 0.45s ease;
+        word-wrap: break-word;
+      }
+
+      .caption.leaving {
+        opacity: 0;
+        transform: translateY(-8px);
+      }
+
+      .caption.partial {
+        opacity: 0.75;
+      }
+
+      .speaker {
+        color: var(--color);
+        font-weight: 700;
+        margin-right: 10px;
+        /* Slightly heavier halo — the colour carries the speaker identity, so it
+           must survive compression and bright backgrounds. */
+        text-shadow: 0 0 5px rgba(0, 0, 0, 1), 0 2px 5px rgba(0, 0, 0, 0.8);
+      }
+
+      @keyframes rise {
+        from {
+          opacity: 0;
+          transform: translateY(10px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      /* Only visible when you open the overlay in a normal browser; OBS users
+         never see it because it hides as soon as the socket connects. */
+      #offline {
+        position: absolute;
+        left: 24px;
+        bottom: 24px;
+        padding: 10px 16px;
+        border-radius: 10px;
+        background: rgba(120, 20, 20, 0.85);
+        color: #fff;
+        font-size: 15px;
+      }
+      #offline.hide {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="stage"></div>
+    <div id="offline">Chatterlayer: connecting…</div>
+
+    <script>
+      (() => {
+        'use strict';
+
+        const stage = document.getElementById('stage');
+        const offline = document.getElementById('offline');
+
+        /** Live settings, replaced by the server's `hello`/`settings` messages. */
+        let settings = {
+          overlay: {
+            fontSize: 30,
+            captionLifetimeMs: 7000,
+            maxLines: 4,
+            showPartials: true,
+            showSpeakerName: true,
+          },
+        };
+
+        /** userId -> element currently showing that speaker's partial text. */
+        const partials = new Map();
+
+        function applySettings() {
+          document.documentElement.style.setProperty(
+            '--size',
+            `${settings.overlay.fontSize}px`
+          );
+          for (const node of stage.children) {
+            node.style.setProperty('--size', `${settings.overlay.fontSize}px`);
+          }
+          trim();
+        }
+
+        function trim() {
+          const max = settings.overlay.maxLines || 4;
+          while (stage.children.length > max) stage.firstChild.remove();
+        }
+
+        function build(cap, isPartial) {
+          const div = document.createElement('div');
+          div.className = `caption${isPartial ? ' partial' : ''}`;
+          div.style.setProperty('--color', cap.color || '#4ecdc4');
+          div.style.setProperty('--size', `${settings.overlay.fontSize}px`);
+
+          if (settings.overlay.showSpeakerName) {
+            const who = document.createElement('span');
+            who.className = 'speaker';
+            who.textContent = cap.username;
+            div.appendChild(who);
+          }
+          const text = document.createElement('span');
+          text.textContent = cap.text;
+          div.appendChild(text);
+          return div;
+        }
+
+        /** Fade a caption out, then remove it. */
+        function expire(node, delay) {
+          const timer = setTimeout(() => {
+            node.classList.add('leaving');
+            setTimeout(() => node.remove(), 500);
+          }, delay);
+          node.dataset.timer = String(timer);
+        }
+
+        function clearTimer(node) {
+          if (node.dataset.timer) clearTimeout(Number(node.dataset.timer));
+        }
+
+        function onCaption(cap) {
+          if (!cap.isFinal) {
+            if (!settings.overlay.showPartials) return;
+            // Update the speaker's in-progress line in place rather than
+            // appending a new line per partial.
+            let node = partials.get(cap.userId);
+            if (node && node.isConnected) {
+              clearTimer(node);
+              node.replaceWith((node = build(cap, true)));
+            } else {
+              node = build(cap, true);
+              stage.appendChild(node);
+            }
+            partials.set(cap.userId, node);
+            // Safety net: if the speaker vanishes mid-word, don't leave the
+            // partial on screen forever.
+            expire(node, settings.overlay.captionLifetimeMs + 4000);
+            trim();
+            return;
+          }
+
+          // Final text supersedes that speaker's partial line.
+          const existing = partials.get(cap.userId);
+          if (existing && existing.isConnected) {
+            clearTimer(existing);
+            existing.remove();
+          }
+          partials.delete(cap.userId);
+
+          const node = build(cap, false);
+          stage.appendChild(node);
+          expire(node, settings.overlay.captionLifetimeMs);
+          trim();
+        }
+
+        // ------------------------------------------------------ socket ---
+
+        let ws = null;
+        let retry = 0;
+
+        function connect() {
+          const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+          ws = new WebSocket(`${proto}://${location.host}`);
+
+          ws.onopen = () => {
+            retry = 0;
+            offline.classList.add('hide');
+          };
+
+          ws.onmessage = (event) => {
+            let msg;
+            try {
+              msg = JSON.parse(event.data);
+            } catch {
+              return;
+            }
+            switch (msg.type) {
+              case 'hello':
+                settings = msg.settings || settings;
+                applySettings();
+                return;
+              case 'settings':
+                settings = msg.settings || settings;
+                applySettings();
+                return;
+              case 'caption':
+                return onCaption(msg);
+              case 'captionCleared': {
+                const node = partials.get(msg.userId);
+                if (node && node.isConnected) {
+                  clearTimer(node);
+                  node.remove();
+                }
+                partials.delete(msg.userId);
+                return;
+              }
+              case 'clear':
+                stage.innerHTML = '';
+                partials.clear();
+                return;
+              default:
+                return;
+            }
+          };
+
+          ws.onclose = () => {
+            offline.classList.remove('hide');
+            offline.textContent = 'Chatterlayer: reconnecting…';
+            // Back off gently, but keep retrying forever — OBS sources are
+            // often loaded before the app is running.
+            retry = Math.min(retry + 1, 10);
+            setTimeout(connect, 500 + retry * 500);
+          };
+
+          ws.onerror = () => ws.close();
+        }
+
+        connect();
+      })();
+    </script>
+  </body>
+</html>

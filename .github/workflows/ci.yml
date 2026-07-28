@@ -1,0 +1,77 @@
+name: CI
+
+# Fast checks on every push and pull request. Deliberately does NOT download
+# speech models (up to 2.3 GB) or run Electron — see selftest.js for what is
+# covered without them.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Self test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run self test
+        run: npm run selftest
+
+      - name: Verify the icon generator still produces a valid PNG
+        run: |
+          node scripts/make-icon.js
+          node -e "const b=require('fs').readFileSync('build/icon.png'); if (b.slice(0,8).toString('hex') !== '89504e470d0a1a0a') { throw new Error('not a PNG'); } console.log('icon ok', b.readUInt32BE(16) + 'x' + b.readUInt32BE(20));"
+
+  package:
+    name: Packaging smoke test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # The libvosk runtime is bundled into the build, so it must be fetched
+      # before electron-builder runs. Models are NOT fetched — the app
+      # downloads those itself on first run.
+      - name: Fetch Vosk runtime
+        run: npm run setup -- --runtime-only
+
+      - name: Generate icon
+        run: npm run icon
+
+      # --dir produces an unpacked build: fast, and enough to catch a broken
+      # electron-builder config without waiting on installer compression.
+      - name: Build (unpacked)
+        run: npm run pack
+
+      - name: Check libvosk was bundled into resources
+        shell: bash
+        run: |
+          set -e
+          found=$(find dist -name "libvosk.dll" | head -1)
+          if [ -z "$found" ]; then
+            echo "::error::libvosk.dll is missing from the packaged output"
+            exit 1
+          fi
+          echo "bundled: $found"

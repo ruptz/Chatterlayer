@@ -1,0 +1,19 @@
+node_modules/
+
+# CI fetches vendor/ before packaging; models are downloaded by the app itself.
+vendor/
+models/
+
+# Packaged installers
+dist/
+
+# Local test artifacts
+test-audio.wav
+*.log
+
+# Never commit
+chatterlayer-config.json
+
+.DS_Store
+Thumbs.db
+make-icon.js

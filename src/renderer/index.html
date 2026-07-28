@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self'; script-src 'self'"
+    />
+    <title>Chatterlayer</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span class="brand-text">
+          <strong>Chatterlayer</strong>
+          <small>Voice captioning for OBS</small>
+        </span>
+      </div>
+
+      <div class="status" id="tally" data-state="standby">
+        <span class="dot"></span>
+        <span id="status-text">Standby</span>
+      </div>
+    </header>
+
+    <main>
+      <!-- ------------------------------------------------------ source -->
+      <section class="card">
+        <div class="card-head">
+          <h2>Source</h2>
+          <span class="meta" id="model-path">Checking model&hellip;</span>
+        </div>
+        <div class="card-body">
+          <div class="grid-2">
+            <div class="field">
+              <label class="label" for="token">Discord bot token</label>
+              <div class="input-row">
+                <input
+                  type="password"
+                  id="token"
+                  placeholder="Paste the bot token"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+                <button type="button" class="btn btn-sm" id="toggle-token">Show</button>
+              </div>
+              <p class="help" id="token-hint">Encrypted by your OS keystore.</p>
+            </div>
+
+            <div class="field">
+              <label class="label" for="channel">Voice channel ID</label>
+              <input
+                type="text"
+                id="channel"
+                placeholder="Right-click the channel &rarr; Copy Channel ID"
+                autocomplete="off"
+                spellcheck="false"
+              />
+              <p class="help">Requires Developer Mode in Discord.</p>
+            </div>
+          </div>
+
+          <div class="field model-field">
+            <label class="label" for="model">Speech model</label>
+            <div class="input-row">
+              <select id="model"></select>
+              <button type="button" class="btn btn-sm" id="manage-models">Get models</button>
+            </div>
+            <p class="help" id="model-note">
+              More accurate models use more memory and CPU.
+            </p>
+
+            <ul class="models" id="model-list" hidden></ul>
+          </div>
+
+          <div class="actions">
+            <button class="btn btn-primary" id="start">Connect</button>
+            <button class="btn btn-danger" id="stop" disabled>Disconnect</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------- channels -->
+      <section class="card">
+        <div class="card-head">
+          <h2>Channels</h2>
+          <span class="meta" id="speaker-count">0 on</span>
+        </div>
+        <div class="card-body">
+          <p class="help spaced">
+            Only channels switched on are transcribed. Switch anyone in or out
+            during the call &mdash; nothing restarts. Click a name to change how
+            it appears on captions.
+          </p>
+          <ul class="rows" id="members">
+            <li class="empty">Connect to see who&rsquo;s in the voice channel.</li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- ------------------------------------------------------ output -->
+      <section class="card">
+        <div class="card-head">
+          <h2>Output</h2>
+        </div>
+        <div class="card-body">
+          <div class="url">
+            <span class="label">OBS browser source</span>
+            <code id="url-overlay">&mdash;</code>
+            <button class="btn btn-sm" data-copy="url-overlay">Copy</button>
+          </div>
+
+          <div class="grid-3">
+            <div class="field">
+              <label class="label" for="font-size">
+                Text size <em id="v-font">30</em>
+              </label>
+              <input type="range" id="font-size" min="14" max="64" step="1" />
+            </div>
+            <div class="field">
+              <label class="label" for="lifetime">
+                Hold <em id="v-life">7.0s</em>
+              </label>
+              <input type="range" id="lifetime" min="2000" max="20000" step="500" />
+            </div>
+            <div class="field">
+              <label class="label" for="max-lines">
+                Max lines <em id="v-lines">4</em>
+              </label>
+              <input type="range" id="max-lines" min="1" max="8" step="1" />
+            </div>
+          </div>
+
+          <div class="checks">
+            <label class="check">
+              <input type="checkbox" id="show-partials" />
+              Live partial text
+            </label>
+            <label class="check">
+              <input type="checkbox" id="show-names" />
+              Speaker names
+            </label>
+          </div>
+
+          <div class="actions bordered">
+            <label class="label inline" for="port">Port</label>
+            <input type="number" id="port" min="1024" max="65535" class="narrow" />
+            <span class="spacer"></span>
+            <button class="btn btn-ghost btn-sm" id="clear">Clear captions</button>
+            <button class="btn btn-ghost btn-sm" id="reveal">Show config file</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ----------------------------------------------------- monitor -->
+      <section class="card">
+        <div class="card-head">
+          <h2>Monitor</h2>
+          <span class="meta" id="stats">&mdash;</span>
+        </div>
+        <div class="card-body">
+          <div class="monitor" id="preview">
+            <p class="empty">Captions appear here as people speak.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- --------------------------------------------------------- log -->
+      <section class="card">
+        <div class="card-head">
+          <h2>Log</h2>
+          <button class="btn btn-ghost btn-sm" id="clear-log">Clear</button>
+        </div>
+        <div class="card-body">
+          <pre class="log" id="log"></pre>
+        </div>
+      </section>
+    </main>
+
+    <footer class="credit">
+      Made with <span class="heart">&#9829;</span> by ruptz
+    </footer>
+
+    <script src="renderer.js"></script>
+  </body>
+</html>
