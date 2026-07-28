@@ -23,6 +23,7 @@ internet connection to transcribe.
 - [Get the voice channel ID](#get-the-voice-channel-id)
 - [Run it](#run-it)
 - [Add the overlay to OBS](#add-the-overlay-to-obs)
+- [Word filter](#word-filter)
 - [Performance: RAM, CPU, latency](#performance-ram-cpu-latency)
 - [Accuracy vs paid speech services](#accuracy-vs-paid-speech-services)
 - [Troubleshooting](#troubleshooting)
@@ -199,6 +200,40 @@ no OBS refresh needed.
 
 The caption server binds to `127.0.0.1`, so it is reachable only from your own
 machine. Nothing is exposed to the network.
+
+---
+
+## Word filter
+
+Captions go on stream the moment they're recognised, with no chance to review
+them. **Racial and ethnic slurs are masked by default**, in both speech and
+speaker names:
+
+```
+he called me a *****        <- speech
+*****                       <- a slur in someone's Discord name
+```
+
+Masking happens in one place, before captions reach OBS or the in-app monitor,
+so unmasked text never leaves the app.
+
+**Whole words only.** Substring matching would censor ordinary speech.
+A filter that mangles normal sentences gets switched off, which
+protects nobody. Plurals are matched automatically, and multi-word slurs are
+caught across adjacent words.
+
+**Adding your own.** The **Word filter** panel takes one word or phrase per
+line. The built-in list covers racial and ethnic slurs only — other categories
+vary by platform and community, so they're yours to set.
+
+Terms that are also ordinary words in common use are deliberately left out of
+the defaults, because a false positive mid-sentence is worse than useless. Add
+them yourself if your community needs them.
+
+> **This is a safety net, not a guarantee.** Speech recognition mishears things:
+> it can miss a slur by transcribing it as something else, and it can invent one
+> that nobody said. Treat the filter as one layer, not as permission to leave
+> captions unattended.
 
 ---
 

@@ -211,6 +211,81 @@ test('all source files parse', () => {
   assert.ok(files.length > 8, `only found ${files.length} source files`);
 });
 
+// --- word filter ---------------------------------------------------------
+
+const { buildFilter, maskText } = require('../src/shared/wordfilter');
+
+console.log('\nword filter');
+
+const filter = buildFilter();
+const mask = (s) => maskText(s, filter).text;
+
+test('masks a slur mid-sentence', () => {
+  const out = mask('what a chink of light');
+  assert.ok(!out.includes('chink'), out);
+  assert.ok(out.includes('*****'), out);
+});
+
+test('preserves surrounding words and spacing', () => {
+  assert.strictEqual(mask('you are a wop mate'), 'you are a *** mate');
+});
+
+test('masks plurals of listed terms', () => {
+  assert.ok(!mask('two spics').includes('spics'));
+});
+
+test('masks multi-word slurs across adjacent words', () => {
+  const out = mask('called him a porch monkey today');
+  assert.ok(!out.includes('porch monkey'), out);
+  assert.ok(out.startsWith('called him a ***** ******'), out);
+});
+
+test('does NOT mask innocent words containing a slur substring', () => {
+  // The Scunthorpe problem. "niggardly" is unrelated in origin; the others
+  // simply contain shorter sequences. Substring matching would break all four.
+  for (const phrase of [
+    'he was niggardly with praise',
+    'that is a classic album',
+    'the assassin escaped',
+    'i need to analyse this',
+  ]) {
+    assert.strictEqual(mask(phrase), phrase, `wrongly masked: ${phrase}`);
+  }
+});
+
+test('leaves ordinary speech untouched', () => {
+  const line = 'okay so the plan is we push through the second gate first';
+  assert.strictEqual(mask(line), line);
+});
+
+test('custom terms are masked, including phrases', () => {
+  const custom = buildFilter({ custom: ['bannedword', 'two words'] });
+  assert.strictEqual(maskText('a bannedword here', custom).text, 'a ********** here');
+  assert.strictEqual(maskText('say two words now', custom).text, 'say *** ***** now');
+});
+
+test('disabling the filter passes text through unchanged', () => {
+  const off = buildFilter({ enabled: false });
+  const line = 'this contains a chink';
+  assert.strictEqual(maskText(line, off).text, line);
+});
+
+test('reports how many words were masked', () => {
+  assert.strictEqual(maskText('a chink and a gook', filter).masked, 2);
+  assert.strictEqual(maskText('nothing to see', filter).masked, 0);
+});
+
+test('handles empty and malformed input', () => {
+  assert.strictEqual(maskText('', filter).text, '');
+  assert.strictEqual(maskText(null, filter).text, '');
+  assert.strictEqual(maskText('   ', filter).text, '   ');
+});
+
+test('filter is on by default in the shipped config', () => {
+  const { DEFAULTS } = require('../src/main/config');
+  assert.strictEqual(DEFAULTS.filter.enabled, true);
+});
+
 // --- CI workflows --------------------------------------------------------
 
 console.log('\nworkflows');

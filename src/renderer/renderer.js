@@ -23,6 +23,9 @@ const el = {
   modelNote: $('model-note'),
   manageModels: $('manage-models'),
   modelList: $('model-list'),
+  filterEnabled: $('filter-enabled'),
+  filterCustom: $('filter-custom'),
+  filterCount: $('filter-count'),
   members: $('members'),
   speakerCount: $('speaker-count'),
   urlOverlay: $('url-overlay'),
@@ -105,6 +108,16 @@ const saveOverlay = debounce(async () => {
     },
   });
 });
+
+const saveFilter = debounce(async () => {
+  const custom = el.filterCustom.value
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  state.config = await window.chatterlayer.updateConfig({
+    filter: { enabled: el.filterEnabled.checked, custom },
+  });
+}, 400);
 
 const savePort = debounce(async () => {
   const port = Number(el.port.value);
@@ -343,6 +356,10 @@ function handleEvent(msg) {
       return;
     }
 
+    case 'filter':
+      el.filterCount.textContent = `${msg.masked} masked`;
+      return;
+
     case 'log':
       if (msg.message) log(msg.message, msg.level);
       return;
@@ -538,6 +555,8 @@ async function init() {
   el.showPartials.checked = c.overlay.showPartials;
   el.showNames.checked = c.overlay.showSpeakerName;
   el.port.value = c.server.port;
+  el.filterEnabled.checked = c.filter.enabled;
+  el.filterCustom.value = (c.filter.custom || []).join('\n');
   syncFaderLabels();
 
   if (state.urls && state.urls.overlay) el.urlOverlay.textContent = state.urls.overlay;
@@ -599,6 +618,16 @@ for (const input of [el.fontSize, el.lifetime, el.maxLines]) {
 el.showPartials.addEventListener('change', saveOverlay);
 el.showNames.addEventListener('change', saveOverlay);
 el.port.addEventListener('input', savePort);
+el.filterEnabled.addEventListener('change', () => {
+  saveFilter();
+  log(
+    el.filterEnabled.checked
+      ? 'Word filter on.'
+      : 'Word filter OFF — captions go out unmasked.',
+    el.filterEnabled.checked ? 'info' : 'warn'
+  );
+});
+el.filterCustom.addEventListener('input', saveFilter);
 
 el.channel.addEventListener('change', () =>
   window.chatterlayer.updateConfig({ channelId: el.channel.value.trim() })

@@ -25,6 +25,12 @@ const DEFAULTS = {
    * Discord usernames are often not what someone wants broadcast.
    */
   aliases: {},
+  /** Slur masking. On by default — captions go out live and unreviewed. */
+  filter: {
+    enabled: true,
+    /** Extra terms beyond the built-in racial/ethnic slur list. */
+    custom: [],
+  },
   /** Optional explicit path to a Vosk model folder; empty = autodetect. */
   modelPath: '',
   server: {

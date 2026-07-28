@@ -23,6 +23,7 @@ const {
   vendorDir,
 } = require('../shared/paths');
 const { catalogWithStatus, installModel, removeModel } = require('../shared/models');
+const { buildFilter, maskText } = require('../shared/wordfilter');
 
 let mainWindow = null;
 let config = null;
@@ -49,6 +50,17 @@ function captionColor(userId) {
 function captionName(userId, fallback) {
   const alias = config.data.aliases[userId];
   return (alias && alias.trim()) || fallback;
+}
+
+/** Compiled slur matcher, rebuilt whenever the filter settings change. */
+let wordFilter = buildFilter({ enabled: true, custom: [] });
+let maskedTotal = 0;
+
+function rebuildFilter() {
+  wordFilter = buildFilter({
+    enabled: config.data.filter.enabled,
+    custom: config.data.filter.custom,
+  });
 }
 
 /**
@@ -112,17 +124,28 @@ function wireEngine() {
   engine.on('message', (msg) => {
     switch (msg.type) {
       case 'caption': {
-        // Colour is resolved here so live palette edits apply immediately.
+        // Everything that goes on stream is resolved here: colour, display
+        // name, and slur masking. Filtering at this single point means
+        // unmasked text never reaches the overlay or the monitor.
+        const body = maskText(msg.text, wordFilter);
+        // A slur can just as easily be in someone's Discord name.
+        const name = maskText(captionName(msg.userId, msg.username), wordFilter);
+
         const caption = {
           userId: msg.userId,
-          username: captionName(msg.userId, msg.username),
-          text: msg.text,
+          username: name.text,
+          text: body.text,
           color: captionColor(msg.userId),
           isFinal: msg.isFinal,
           timestamp: msg.timestamp,
         };
         server.sendCaption(caption);
         send('chatterlayer:caption', caption);
+
+        if (msg.isFinal && body.masked + name.masked > 0) {
+          maskedTotal += body.masked + name.masked;
+          send('chatterlayer:event', { type: 'filter', masked: maskedTotal });
+        }
         return;
       }
       case 'captionCleared':
@@ -153,6 +176,7 @@ function wireEngine() {
 
 async function bootstrap() {
   config = new ConfigStore();
+  rebuildFilter();
   server = new CaptionServer();
   engine = new EngineHost();
 
@@ -197,6 +221,8 @@ ipcMain.handle('chatterlayer:updateConfig', async (_e, patch) => {
   if (patch.overlay !== undefined) {
     server.updateSettings(displaySettings());
   }
+
+  if (patch.filter !== undefined) rebuildFilter();
 
   // Changing host/port needs the server rebound.
   if (JSON.stringify(config.data.server) !== before) {

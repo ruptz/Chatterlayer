@@ -154,6 +154,39 @@
         </div>
       </section>
 
+      <!-- ------------------------------------------------------ filter -->
+      <section class="card">
+        <div class="card-head">
+          <h2>Word filter</h2>
+          <span class="meta" id="filter-count">0 masked</span>
+        </div>
+        <div class="card-body">
+          <label class="check">
+            <input type="checkbox" id="filter-enabled" />
+            Mask slurs before they reach the stream
+          </label>
+
+          <p class="help spaced">
+            Racial and ethnic slurs are replaced with
+            <code>*****</code> in both speech and speaker names. Whole words
+            only, so ordinary speech isn&rsquo;t mangled.
+          </p>
+
+          <div class="field">
+            <label class="label" for="filter-custom">Also mask these</label>
+            <textarea
+              id="filter-custom"
+              rows="3"
+              spellcheck="false"
+              placeholder="One word or phrase per line"
+            ></textarea>
+            <p class="help">
+              Saved as you type. Plurals are matched automatically.
+            </p>
+          </div>
+        </div>
+      </section>
+
       <!-- ----------------------------------------------------- monitor -->
       <section class="card">
         <div class="card-head">
