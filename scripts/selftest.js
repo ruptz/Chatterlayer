@@ -240,6 +240,44 @@ test('masks multi-word slurs across adjacent words', () => {
   assert.ok(out.startsWith('called him a ***** ******'), out);
 });
 
+test('masks a term the recogniser split into separate words', () => {
+  // Vosk decides where the word boundaries go, and it is not consistent about
+  // it. Every one of these is a single entry in DEFAULT_TERMS.
+  for (const [line, expected] of [
+    ['called him a zipper head', 'called him a ****** ****'],
+    ['what a towel head', 'what a ***** ****'],
+    ['he is a pick a ninny', 'he is a **** * *****'],
+    ['a rag head remark', 'a *** **** remark'],
+  ]) {
+    assert.strictEqual(mask(line), expected);
+  }
+});
+
+test('masks a phrase the recogniser ran together, and its plural', () => {
+  assert.strictEqual(mask('a porchmonkey'), 'a ***********');
+  assert.strictEqual(mask('two porch monkeys'), 'two ***** *******');
+});
+
+test('does not crash when text ends on the start of a longer term', () => {
+  // Partial results arrive a word at a time, so "porch" is emitted on its own
+  // before "porch monkey" is ever complete. This used to read past the end of
+  // the word list and take down the main process.
+  assert.strictEqual(mask('porch'), 'porch');
+  assert.strictEqual(mask('i sat on the porch'), 'i sat on the porch');
+  assert.strictEqual(mask('cotton'), 'cotton');
+});
+
+test('does NOT join short words into an accidental match', () => {
+  // The flip side of joining: without a length floor these read as slurs.
+  for (const line of [
+    'yeah we can go ok',
+    'i was there in june',
+    'put it on the top of the pile',
+  ]) {
+    assert.strictEqual(mask(line), line, `wrongly masked: ${line}`);
+  }
+});
+
 test('does NOT mask innocent words containing a slur substring', () => {
   // The Scunthorpe problem. "niggardly" is unrelated in origin; the others
   // simply contain shorter sequences. Substring matching would break all four.
