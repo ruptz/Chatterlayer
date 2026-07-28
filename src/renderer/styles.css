@@ -969,8 +969,11 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 /* ------------------------------------------------------------- credit --- */
 
 .credit {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 11px;
   padding: 0 24px 26px;
-  text-align: center;
   font-size: 12px;
   color: #4e545c;
 }
@@ -979,6 +982,50 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   color: var(--onair);
   opacity: 0.75;
   margin: 0 1px;
+}
+
+.credit .sep {
+  width: 1px;
+  height: 12px;
+  background: var(--border);
+  flex: none;
+}
+
+/* Kept at the credit line's own weight — invisible chrome until pointed at,
+   then it warms to the same lamp red as the heart beside it. */
+.kofi {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: color 0.15s var(--ease), background 0.15s var(--ease),
+    border-color 0.15s var(--ease);
+}
+
+.kofi svg {
+  flex: none;
+  opacity: 0.85;
+}
+
+.kofi:hover {
+  color: var(--onair);
+  background: rgba(255, 90, 82, 0.07);
+  border-color: rgba(255, 90, 82, 0.26);
+}
+
+.kofi:focus-visible {
+  outline: none;
+  color: var(--text-2);
+  border-color: var(--border-strong);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.12);
 }
 
 /* --------------------------------------------------------- scrollbars --- */

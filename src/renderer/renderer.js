@@ -41,6 +41,7 @@ const el = {
   stats: $('stats'),
   log: $('log'),
   clearLog: $('clear-log'),
+  donate: $('donate'),
   vFont: $('v-font'),
   vLife: $('v-life'),
   vLines: $('v-lines'),
@@ -669,6 +670,10 @@ el.clear.addEventListener('click', async () => {
 
 el.reveal.addEventListener('click', () => window.chatterlayer.revealConfig());
 el.clearLog.addEventListener('click', () => el.log.replaceChildren());
+
+el.donate.addEventListener('click', () =>
+  window.chatterlayer.openExternal('https://ko-fi.com/ruptz')
+);
 
 window.chatterlayer.onModelProgress(onModelProgress);
 window.chatterlayer.onEvent(handleEvent);
