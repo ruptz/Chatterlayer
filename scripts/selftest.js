@@ -211,6 +211,55 @@ test('all source files parse', () => {
   assert.ok(files.length > 8, `only found ${files.length} source files`);
 });
 
+// --- CI workflows --------------------------------------------------------
+
+console.log('\nworkflows');
+
+// js-yaml arrives via electron-builder rather than directly, so treat it as
+// optional — a missing dev dependency shouldn't fail the suite.
+let yaml = null;
+try {
+  yaml = require('js-yaml');
+} catch {
+  /* skipped below */
+}
+
+const workflowDir = path.join(__dirname, '..', '.github', 'workflows');
+
+test('workflow and builder YAML parses', () => {
+  if (!yaml) {
+    console.log('        (skipped — js-yaml not installed)');
+    return;
+  }
+  const files = [
+    ...fs.readdirSync(workflowDir).map((f) => path.join(workflowDir, f)),
+    path.join(__dirname, '..', 'electron-builder.yml'),
+  ];
+  for (const file of files) {
+    try {
+      assert.ok(yaml.load(fs.readFileSync(file, 'utf8')), `${path.basename(file)} is empty`);
+    } catch (err) {
+      throw new Error(`${path.basename(file)}: ${err.message}`);
+    }
+  }
+});
+
+test('release job passes tag_name explicitly', () => {
+  // Without this the action falls back to github.ref, which is a branch ref on
+  // a manual run and fails with "Missing tag_name parameter".
+  const release = fs.readFileSync(path.join(workflowDir, 'release.yml'), 'utf8');
+  assert.ok(/tag_name:\s*\$\{\{/.test(release), 'release.yml must set tag_name');
+});
+
+test('workflows do not pin a deprecated Node version', () => {
+  for (const name of fs.readdirSync(workflowDir)) {
+    const text = fs.readFileSync(path.join(workflowDir, name), 'utf8');
+    for (const [, version] of text.matchAll(/node-version:\s*'?(\d+)/g)) {
+      assert.ok(Number(version) >= 22, `${name} pins Node ${version}; use 22 or newer`);
+    }
+  }
+});
+
 // --- result --------------------------------------------------------------
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

@@ -6,8 +6,10 @@ name: Release
 #   1. bump "version" in package.json
 #   2. git tag v1.0.1 && git push origin v1.0.1
 #
-# Or run this workflow manually from the Actions tab to produce artifacts
-# without publishing (useful for testing the pipeline).
+# Running it manually from the Actions tab:
+#   - with a tag  -> builds and publishes a draft release for that tag
+#   - no tag      -> builds artifacts only; the release job is skipped, because
+#                    a release cannot be created without a tag to attach to
 
 on:
   push:
@@ -15,10 +17,13 @@ on:
       - 'v*'
   workflow_dispatch:
     inputs:
-      publish:
-        description: 'Create a GitHub Release from this run'
-        type: boolean
-        default: false
+      tag:
+        # A release needs a tag to attach to. Running this manually from a
+        # branch with no tag produces build artifacts only — it cannot create a
+        # release, because there is nothing to name it after.
+        description: 'Tag to publish (e.g. v1.0.1). Leave blank to build artifacts only.'
+        required: false
+        type: string
 
 permissions:
   contents: write # required to create the release and upload assets
@@ -58,7 +63,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
@@ -98,10 +103,23 @@ jobs:
     name: Publish release
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
+    # Only run when there is an actual tag to release. On a tag push that's
+    # github.ref_name; on a manual run it's whatever was typed in.
+    if: github.ref_type == 'tag' || inputs.tag
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Resolve the tag to publish
+        id: tag
+        run: |
+          TAG="${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            echo "::error::No tag to release. Push a v* tag, or supply one when running manually."
+            exit 1
+          fi
+          echo "name=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Publishing $TAG"
 
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
@@ -115,12 +133,17 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          # Passed explicitly. Left to the action's default it reads github.ref,
+          # which is a branch ref on a manual run and fails with
+          # "Missing tag_name parameter".
+          tag_name: ${{ steps.tag.outputs.name }}
+          target_commitish: ${{ github.sha }}
           files: artifacts/*
           draft: true # review before it goes public
           generate_release_notes: true
-          name: Chatterlayer ${{ github.ref_name }}
+          name: Chatterlayer ${{ steps.tag.outputs.name }}
           body: |
-            ## Chatterlayer ${{ github.ref_name }}
+            ## Chatterlayer ${{ steps.tag.outputs.name }}
 
             Live, colour-coded Discord voice captions for OBS. Free and fully
             offline — speech recognition runs on your own machine. No API keys,
