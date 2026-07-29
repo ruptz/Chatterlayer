@@ -11,7 +11,13 @@
 
 const path = require('path');
 const { Worker } = require('worker_threads');
-const { Client, GatewayIntentBits, ChannelType, Events } = require('discord.js');
+const {
+  Client,
+  GatewayIntentBits,
+  ChannelType,
+  Events,
+  PermissionsBitField,
+} = require('discord.js');
 const {
   joinVoiceChannel,
   EndBehaviorType,
@@ -67,6 +73,10 @@ class ChatterlayerEngine {
     this.stopping = false;
     /** userId -> consecutive stream restarts, so a broken stream can't spin. */
     this.restarts = new Map();
+    /** In-flight signIn, so concurrent callers await one login rather than racing. */
+    this.signingIn = null;
+    /** Token behind the live session, so a changed one forces a real re-login. */
+    this.token = null;
   }
 
   log(level, message) {
@@ -170,24 +180,59 @@ class ChatterlayerEngine {
 
   // ------------------------------------------------------------- Discord ---
 
-  async start({ token, channelId, modelPath }) {
+  /**
+   * Log in and stay logged in, without touching Vosk or joining anything.
+   *
+   * Split out from start() so the UI can list the bot's servers and voice
+   * channels before the user has picked one. Idempotent, and safe to call
+   * concurrently — the second caller awaits the first login rather than
+   * building a second client.
+   */
+  async signIn(token) {
+    // Already live on this exact token — just re-publish the tree, which makes
+    // this double as the Refresh action.
+    if (this.client && this.client.isReady() && this.token === token) {
+      this.emitGuilds();
+      return;
+    }
+    if (this.signingIn) return this.signingIn;
+    this.signingIn = this._signIn(token).finally(() => {
+      this.signingIn = null;
+    });
+    return this.signingIn;
+  }
+
+  async _signIn(token) {
     if (!token) throw new Error('No bot token provided.');
-    if (!channelId) throw new Error('No voice channel ID provided.');
 
-    await this.startWorker(modelPath);
+    // Reaching here with a live client means the token changed. The old
+    // session is the wrong one, so drop it — including any voice connection,
+    // which belongs to a bot we're about to stop being.
+    if (this.client) {
+      await this.leave({ announce: true });
+      try {
+        await this.client.destroy();
+      } catch {
+        /* ignore */
+      }
+      this.client = null;
+    }
 
-    this.emit({ type: 'status', state: 'connecting', message: 'Logging in to Discord…' });
+    this.emit({ type: 'auth', state: 'signing-in', message: 'Signing in to Discord…' });
 
     // Non-privileged intents only. Voice-state payloads carry the member
     // object, so nobody has to enable "Server Members" in the dev portal.
-    this.client = new Client({
+    // Guilds also delivers the full channel list at login, which is what the
+    // server/channel pickers are built from — no extra requests, no extra
+    // permissions.
+    const client = new Client({
       intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
     });
 
-    this.client.on('error', (err) => this.log('error', `Discord client error: ${err.message}`));
+    client.on('error', (err) => this.log('error', `Discord client error: ${err.message}`));
 
     // Keep the member list live as people join/leave/move.
-    this.client.on('voiceStateUpdate', (oldState, newState) => {
+    client.on('voiceStateUpdate', (oldState, newState) => {
       if (!this.channel) return;
       if (oldState.channelId === this.channel.id || newState.channelId === this.channel.id) {
         // A user who left should stop consuming a recognizer.
@@ -198,32 +243,121 @@ class ChatterlayerEngine {
       }
     });
 
-    await this.client.login(token);
+    this.client = client;
 
-    // login() resolves when the handshake starts, not when the client is
-    // usable. Until READY, client.user is null and the gateway can't deliver
-    // the voice state update joinVoiceChannel needs — the voice connection
-    // would silently never come up.
-    if (!this.client.isReady()) {
-      this.emit({
-        type: 'status',
-        state: 'connecting',
-        message: 'Waiting for Discord to finish connecting…',
-      });
-      await onceWithTimeout(
-        this.client,
-        Events.ClientReady,
-        GATEWAY_READY_TIMEOUT_MS,
-        'Discord gateway connection'
-      );
+    try {
+      await client.login(token);
+
+      // login() resolves when the handshake starts, not when the client is
+      // usable. Until READY, client.user is null, the guild caches are empty
+      // and the gateway can't deliver the voice state update joinVoiceChannel
+      // needs — the voice connection would silently never come up.
+      if (!client.isReady()) {
+        await onceWithTimeout(
+          client,
+          Events.ClientReady,
+          GATEWAY_READY_TIMEOUT_MS,
+          'Discord gateway connection'
+        );
+      }
+    } catch (err) {
+      // Leave no half-built client behind, or a retry with a corrected token
+      // would find `this.client` set and skip the login entirely.
+      this.client = null;
+      this.token = null;
+      try {
+        await client.destroy();
+      } catch {
+        /* never logged in */
+      }
+      this.emit({ type: 'auth', state: 'error', message: err.message });
+      throw err;
     }
 
+    this.token = token;
     this.emit({
-      type: 'status',
-      state: 'authenticated',
-      message: `Signed in as ${this.client.user.tag}`,
-      botTag: this.client.user.tag,
+      type: 'auth',
+      state: 'signed-in',
+      message: `Signed in as ${client.user.tag}`,
+      botTag: client.user.tag,
     });
+    this.emitGuilds();
+  }
+
+  /**
+   * Every voice channel the bot can see, grouped by server, with whether it
+   * could actually join each one.
+   */
+  emitGuilds() {
+    if (!this.client || !this.client.isReady()) return;
+    const me = this.client.user;
+
+    const guilds = [...this.client.guilds.cache.values()]
+      .map((guild) => ({
+        id: guild.id,
+        name: guild.name,
+        channels: [...guild.channels.cache.values()]
+          .filter(
+            (c) =>
+              c.type === ChannelType.GuildVoice || c.type === ChannelType.GuildStageVoice
+          )
+          .sort((a, b) => a.rawPosition - b.rawPosition)
+          .map((c) => this.describeChannel(c, me)),
+      }))
+      // A server with no voice channels is nothing to pick from.
+      .filter((g) => g.channels.length)
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    this.emit({ type: 'guilds', guilds, botTag: me.tag });
+  }
+
+  describeChannel(channel, me) {
+    const stage = channel.type === ChannelType.GuildStageVoice;
+
+    // permissionsFor returns null when the bot's own member isn't cached.
+    // That has to read as "unknown", never as "can't join" — greying out a
+    // channel that actually works would be worse than showing no verdict.
+    let perms = null;
+    try {
+      perms = channel.permissionsFor(me);
+    } catch {
+      perms = null;
+    }
+
+    let canJoin = null;
+    let reason = '';
+    if (perms) {
+      const missing = [];
+      if (!perms.has(PermissionsBitField.Flags.ViewChannel)) missing.push('View Channel');
+      if (!perms.has(PermissionsBitField.Flags.Connect)) missing.push('Connect');
+      canJoin = missing.length === 0;
+      if (missing.length) reason = `Bot is missing ${missing.join(' and ')} here`;
+    }
+
+    return {
+      id: channel.id,
+      name: channel.name,
+      stage,
+      canJoin,
+      reason,
+      // Bots are subject to the user limit unless they can move members.
+      full:
+        !stage &&
+        channel.userLimit > 0 &&
+        channel.members.size >= channel.userLimit &&
+        !perms?.has(PermissionsBitField.Flags.MoveMembers),
+    };
+  }
+
+  async start({ token, channelId, modelPath }) {
+    if (!channelId) throw new Error('No voice channel selected.');
+
+    // Sign in before loading the model: a bad token then fails in a couple of
+    // seconds instead of after a 30-second Gigaspeech load. Usually a no-op,
+    // because the app signs in at launch.
+    await this.signIn(token);
+
+    await this.startWorker(modelPath);
 
     this.emit({
       type: 'status',
@@ -461,7 +595,14 @@ class ChatterlayerEngine {
 
   // -------------------------------------------------------------- teardown --
 
-  async stop() {
+  /**
+   * Leave the voice channel and free the recognizers, but stay signed in.
+   *
+   * Disconnect deliberately does not log the client out: the server and
+   * channel pickers are built from the signed-in client's caches, and emptying
+   * them every time someone disconnects would make the app look broken.
+   */
+  async leave({ announce = true } = {}) {
     this.stopping = true;
     this.restarts.clear();
     for (const userId of [...this.streams.keys()]) this.teardownStream(userId);
@@ -474,17 +615,10 @@ class ChatterlayerEngine {
       }
       this.connection = null;
     }
-    if (this.client) {
-      try {
-        await this.client.destroy();
-      } catch {
-        /* ignore */
-      }
-      this.client = null;
-    }
     if (this.worker) {
-      // Capture the reference — if Start is hit again within the grace period,
-      // `this.worker` points at a new worker and the timer would kill it.
+      // Capture the reference — if Connect is hit again within the grace
+      // period, `this.worker` points at a new worker and the timer would kill
+      // that one instead.
       const dying = this.worker;
       this.worker = null;
       this.workerReady = false;
@@ -495,6 +629,22 @@ class ChatterlayerEngine {
     this.channel = null;
     this.receiver = null;
     this.stopping = false;
+    if (announce) this.emit({ type: 'status', state: 'stopped', message: 'Stopped.' });
+  }
+
+  /** Full teardown including the Discord session — for app shutdown. */
+  async stop() {
+    await this.leave({ announce: false });
+    if (this.client) {
+      try {
+        await this.client.destroy();
+      } catch {
+        /* ignore */
+      }
+      this.client = null;
+    }
+    this.token = null;
+    this.emit({ type: 'auth', state: 'signed-out', message: 'Signed out.' });
     this.emit({ type: 'status', state: 'stopped', message: 'Stopped.' });
   }
 }
@@ -511,6 +661,12 @@ const engine = new ChatterlayerEngine(emit);
 async function handleCommand(msg) {
   try {
     switch (msg.type) {
+      case 'signIn':
+        // A failed sign-in already reported itself as an `auth` event. Letting
+        // it fall through to the catch below would also raise a `status: error`
+        // and put the whole app in a fault state, which is far too loud for
+        // "the saved token needs re-pasting" on a background launch sign-in.
+        return await engine.signIn(msg.token).catch(() => undefined);
       case 'start':
         return await engine.start(msg);
       case 'setSelected':
@@ -520,7 +676,7 @@ async function handleCommand(msg) {
       case 'stats':
         return engine.worker && engine.worker.postMessage({ type: 'stats' });
       case 'stop':
-        return await engine.stop();
+        return await engine.leave();
       case 'shutdown':
         await engine.stop();
         return process.exit(0);

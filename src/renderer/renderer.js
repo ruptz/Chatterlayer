@@ -15,6 +15,13 @@ const el = {
   token: $('token'),
   toggleToken: $('toggle-token'),
   tokenHint: $('token-hint'),
+  guild: $('guild'),
+  refreshGuilds: $('refresh-guilds'),
+  authNote: $('auth-note'),
+  voiceChannel: $('voice-channel'),
+  channelNote: $('channel-note'),
+  manualChannel: $('manual-channel'),
+  toggleManual: $('toggle-manual'),
   channel: $('channel'),
   start: $('start'),
   stop: $('stop'),
@@ -47,7 +54,13 @@ const el = {
   vLines: $('v-lines'),
 };
 
-let state = { config: null, members: [], running: false };
+let state = {
+  config: null,
+  members: [],
+  running: false,
+  /** Sign-in state and the server/channel tree the pickers are built from. */
+  discord: { auth: 'idle', botTag: null, message: '', guilds: [] },
+};
 /** userId -> the monitor line currently showing that speaker's partial text. */
 const partials = new Map();
 /** userId -> timer clearing the channel lamp blip. */
@@ -128,6 +141,144 @@ const savePort = debounce(async () => {
     server: { ...state.config.server, port },
   });
 }, 700);
+
+// ------------------------------------------------- server / channel pickers --
+
+function renderAuth() {
+  const d = state.discord;
+  const set = (text, tone) => {
+    el.authNote.textContent = text;
+    if (tone) el.authNote.dataset.state = tone;
+    else el.authNote.removeAttribute('data-state');
+  };
+
+  if (d.auth === 'signed-in') set(d.botTag ? `Signed in as ${d.botTag}` : 'Signed in', 'ok');
+  else if (d.auth === 'signing-in') set('Signing in…', 'working');
+  else if (d.auth === 'error') set(d.message || 'Sign-in failed — check your bot token.', 'fault');
+  else if (state.config && state.config.hasToken) set('Not signed in — press Refresh.');
+  else set('Paste your bot token, then press Refresh.');
+}
+
+function renderGuilds() {
+  const guilds = state.discord.guilds || [];
+  el.guild.replaceChildren();
+
+  if (!guilds.length) {
+    const opt = document.createElement('option');
+    opt.textContent =
+      state.discord.auth === 'signed-in' ? 'No servers with voice channels' : '—';
+    el.guild.appendChild(opt);
+    el.guild.disabled = true;
+    renderChannels();
+    return;
+  }
+
+  el.guild.disabled = false;
+  for (const g of guilds) {
+    const opt = document.createElement('option');
+    opt.value = g.id;
+    opt.textContent = g.name;
+    el.guild.appendChild(opt);
+  }
+
+  // Come back to where they left off. If the remembered server is gone, fall
+  // back to whichever one holds the remembered channel before giving up.
+  const saved = state.config.guildId;
+  const holder = guilds.find((g) => g.channels.some((c) => c.id === state.config.channelId));
+  el.guild.value = (guilds.some((g) => g.id === saved) ? saved : (holder || guilds[0]).id);
+  renderChannels();
+}
+
+function renderChannels() {
+  const guild = (state.discord.guilds || []).find((g) => g.id === el.guild.value);
+  el.voiceChannel.replaceChildren();
+
+  if (!guild) {
+    const opt = document.createElement('option');
+    opt.textContent = '—';
+    el.voiceChannel.appendChild(opt);
+    el.voiceChannel.disabled = true;
+    updateChannelNote();
+    return;
+  }
+
+  el.voiceChannel.disabled = false;
+  for (const c of guild.channels) {
+    const opt = document.createElement('option');
+    opt.value = c.id;
+
+    const tags = [];
+    if (c.stage) tags.push('stage');
+    if (c.canJoin === false) tags.push('no access');
+    else if (c.full) tags.push('full');
+    opt.textContent = tags.length ? `${c.name} — ${tags.join(', ')}` : c.name;
+
+    // Listed but unselectable: hiding a channel the bot lacks permission for
+    // turns a fixable permissions mistake into a channel that appears not to
+    // exist, which is far harder to diagnose.
+    opt.disabled = c.canJoin === false;
+    if (c.reason) opt.title = c.reason;
+
+    el.voiceChannel.appendChild(opt);
+  }
+
+  const saved = guild.channels.find((c) => c.id === state.config.channelId);
+  const firstJoinable = guild.channels.find((c) => c.canJoin !== false);
+  const pick = saved && saved.canJoin !== false ? saved : firstJoinable;
+  el.voiceChannel.value = pick ? pick.id : '';
+  updateChannelNote();
+}
+
+function currentChannel() {
+  const guild = (state.discord.guilds || []).find((g) => g.id === el.guild.value);
+  if (!guild) return null;
+  return guild.channels.find((c) => c.id === el.voiceChannel.value) || null;
+}
+
+function updateChannelNote() {
+  const c = currentChannel();
+
+  if (!c) {
+    el.channelNote.textContent =
+      state.discord.auth === 'signed-in'
+        ? 'No voice channel here that the bot can join.'
+        : 'Sign in to list your servers and voice channels.';
+    el.channelNote.removeAttribute('data-state');
+    return;
+  }
+
+  const notes = [];
+  // Joining a stage puts a bot in the audience, where it receives no audio at
+  // all. Without this note that failure looks like Chatterlayer being broken.
+  if (c.stage) {
+    notes.push(
+      'Stage channel — the bot joins as audience and hears nothing until you invite it to speak.'
+    );
+  }
+  if (c.full) notes.push('This channel is at its user limit, so the bot may not fit.');
+  if (c.canJoin === null) notes.push("Couldn't verify the bot's permissions here.");
+
+  el.channelNote.textContent = notes.length
+    ? notes.join(' ')
+    : 'Chatterlayer will join this channel and list everyone in it.';
+  if (notes.length) el.channelNote.dataset.state = 'working';
+  else el.channelNote.removeAttribute('data-state');
+}
+
+/** Manual entry wins when it's open and filled, otherwise the picker. */
+function effectiveChannelId() {
+  if (!el.manualChannel.hidden) {
+    const manual = el.channel.value.trim();
+    if (manual) return manual;
+  }
+  return el.voiceChannel.value || '';
+}
+
+async function persistChannel() {
+  const channelId = el.voiceChannel.value;
+  if (!channelId) return;
+  state.config = await window.chatterlayer.updateConfig({ channelId });
+}
 
 // ------------------------------------------------------- channel strips --
 
@@ -320,6 +471,38 @@ function handleEvent(msg) {
         setTally('linking', 'Linking');
         log(msg.message);
       }
+      return;
+
+    case 'auth':
+      state.discord = {
+        ...state.discord,
+        auth: msg.state,
+        botTag: msg.botTag || state.discord.botTag,
+        message: msg.message || '',
+      };
+      // No session, nothing to pick from.
+      if (msg.state === 'error' || msg.state === 'signed-out') state.discord.guilds = [];
+      renderAuth();
+      renderGuilds();
+      // A failed background sign-in is a nuisance, not a fault — the tally
+      // lamp stays where it is and only the Source panel says so.
+      if (msg.state === 'error') log(msg.message, 'warn');
+      else if (msg.message) log(msg.message);
+      return;
+
+    case 'guilds':
+      state.discord = {
+        ...state.discord,
+        guilds: msg.guilds,
+        botTag: msg.botTag || state.discord.botTag,
+      };
+      renderAuth();
+      renderGuilds();
+      log(
+        msg.guilds.length
+          ? `${msg.guilds.length} server${msg.guilds.length === 1 ? '' : 's'} with voice channels.`
+          : 'The bot is not in any server with a voice channel yet.'
+      );
       return;
 
     case 'vosk':
@@ -542,6 +725,8 @@ async function init() {
   const c = state.config;
 
   el.channel.value = c.channelId || '';
+  renderAuth();
+  renderGuilds();
   if (c.hasToken) {
     el.token.value = '••••••••••••••••••••••••';
     el.token.dataset.masked = '1';
@@ -596,7 +781,10 @@ el.start.addEventListener('click', async () => {
   try {
     await window.chatterlayer.start({
       token: el.token.dataset.masked ? undefined : el.token.value.trim() || undefined,
-      channelId: el.channel.value.trim(),
+      // Undefined rather than empty: if the pickers haven't populated yet,
+      // this must fall through to the remembered channel, not erase it.
+      channelId: effectiveChannelId() || undefined,
+      guildId: el.guild.value || undefined,
     });
   } catch (err) {
     setTally('fault', 'Fault');
@@ -629,6 +817,36 @@ el.filterEnabled.addEventListener('change', () => {
   );
 });
 el.filterCustom.addEventListener('input', saveFilter);
+
+el.refreshGuilds.addEventListener('click', async () => {
+  try {
+    await window.chatterlayer.signIn(
+      el.token.dataset.masked ? undefined : el.token.value.trim() || undefined
+    );
+  } catch (err) {
+    log(err.message, 'error');
+  }
+});
+
+el.guild.addEventListener('change', async () => {
+  state.config = await window.chatterlayer.updateConfig({ guildId: el.guild.value });
+  renderChannels();
+  await persistChannel();
+});
+
+el.voiceChannel.addEventListener('change', async () => {
+  updateChannelNote();
+  await persistChannel();
+});
+
+el.toggleManual.addEventListener('click', () => {
+  const wasOpen = !el.manualChannel.hidden;
+  el.manualChannel.hidden = wasOpen;
+  el.toggleManual.textContent = wasOpen
+    ? 'Enter a channel ID manually'
+    : 'Use the pickers instead';
+  if (wasOpen) persistChannel();
+});
 
 el.channel.addEventListener('change', () =>
   window.chatterlayer.updateConfig({ channelId: el.channel.value.trim() })

@@ -15,7 +15,14 @@ const { app, safeStorage } = require('electron');
 const CONFIG_FILENAME = 'chatterlayer-config.json';
 
 const DEFAULTS = {
+  /** The voice channel to join. Still the only thing the engine needs. */
   channelId: '',
+  /**
+   * Which server the channel belongs to. Not used to connect — it only
+   * restores the server picker to where you left it, so the channel dropdown
+   * comes back populated instead of blank.
+   */
+  guildId: '',
   /** Discord user IDs toggled ON for captioning. */
   selected: [],
   /** userId -> "#rrggbb" overrides; unset users fall back to the hashed palette. */

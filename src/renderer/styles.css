@@ -362,8 +362,70 @@ textarea:focus-visible {
   color: var(--text-2);
 }
 
-.model-field {
+.model-field,
+.channel-field {
   margin-top: 18px;
+}
+
+/* --- channel picker ------------------------------------------------------ */
+
+/* The sign-in line under the server picker carries state, so it gets the same
+   colour language as the tally lamp rather than staying muted grey. */
+.help[data-state="ok"] {
+  color: var(--live);
+}
+
+.help[data-state="working"] {
+  color: var(--warn);
+}
+
+.help[data-state="fault"] {
+  color: var(--onair);
+}
+
+/* Channels the bot can't join are still listed — hiding them turns a
+   permissions mistake into a channel that mysteriously doesn't exist. */
+select option:disabled {
+  color: var(--text-3);
+}
+
+.linky {
+  align-self: flex-start;
+  padding: 0;
+  background: none;
+  border: 0;
+  color: var(--text-3);
+  font-family: inherit;
+  font-size: 11.5px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.linky:hover {
+  color: var(--text-2);
+}
+
+.linky:focus-visible {
+  outline: none;
+  color: var(--text);
+}
+
+.manual {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 4px;
+  padding: 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+
+/* A class selector outranks the UA's `[hidden] { display: none }`, so the
+   display above would keep this visible while `hidden` was set. */
+.manual[hidden] {
+  display: none;
 }
 
 select {

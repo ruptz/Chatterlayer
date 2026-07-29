@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('chatterlayer', {
   updateConfig: (patch) => ipcRenderer.invoke('chatterlayer:updateConfig', patch),
   setToken: (token) => ipcRenderer.invoke('chatterlayer:setToken', token),
 
+  signIn: (token) => ipcRenderer.invoke('chatterlayer:signIn', token),
   start: (opts) => ipcRenderer.invoke('chatterlayer:start', opts),
   stop: () => ipcRenderer.invoke('chatterlayer:stop'),
   setSelected: (userIds) => ipcRenderer.invoke('chatterlayer:setSelected', userIds),

@@ -16,7 +16,10 @@ class EngineHost extends EventEmitter {
   constructor() {
     super();
     this.child = null;
+    /** In a voice channel (or on the way there), so a model is loaded. */
     this.running = false;
+    /** Logged in to Discord. Survives Disconnect — the pickers depend on it. */
+    this.signedIn = false;
     /** Remembered so we can restore state if the engine has to be restarted. */
     this.lastStart = null;
     this.selected = [];
@@ -40,17 +43,35 @@ class EngineHost extends EventEmitter {
       this.emit('message', { type: 'log', level: 'error', message: d.toString().trim() })
     );
 
-    this.child.on('message', (msg) => this.emit('message', msg));
+    // Track the sign-in state the engine reports, so the host and the UI can't
+    // disagree about whether the pickers have a live session behind them.
+    this.child.on('message', (msg) => {
+      if (msg.type === 'auth') {
+        if (msg.state === 'signed-in') this.signedIn = true;
+        else if (msg.state === 'error' || msg.state === 'signed-out') this.signedIn = false;
+      }
+      this.emit('message', msg);
+    });
 
     this.child.on('exit', (code, signal) => {
       this.child = null;
       const wasRunning = this.running;
+      const wasSignedIn = this.signedIn;
       this.running = false;
+      this.signedIn = false;
       if (wasRunning) {
         this.emit('message', {
           type: 'status',
           state: 'error',
-          message: `Engine stopped unexpectedly (code ${code ?? signal}). Press Start to retry.`,
+          message: `Engine stopped unexpectedly (code ${code ?? signal}). Press Connect to retry.`,
+        });
+      } else if (wasSignedIn) {
+        // Signed in but idle — losing the session only costs the pickers, so
+        // say so quietly rather than throwing the app into a fault state.
+        this.emit('message', {
+          type: 'auth',
+          state: 'error',
+          message: `Discord session ended (code ${code ?? signal}). Sign in again to refresh the channel list.`,
         });
       }
     });
@@ -60,6 +81,16 @@ class EngineHost extends EventEmitter {
     );
 
     return this.child;
+  }
+
+  /**
+   * Log in without joining anything, so the channel pickers can populate.
+   * Also the refresh path: signing in with the token already in use just
+   * re-publishes the server/channel tree.
+   */
+  signIn(token) {
+    this.spawn();
+    this.child.send({ type: 'signIn', token });
   }
 
   async start(opts) {
@@ -90,6 +121,7 @@ class EngineHost extends EventEmitter {
 
   async shutdown() {
     this.running = false;
+    this.signedIn = false;
     if (!this.child) return;
     const child = this.child;
     child.send({ type: 'shutdown' });

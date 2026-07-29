@@ -52,6 +52,16 @@ function captionName(userId, fallback) {
   return (alias && alias.trim()) || fallback;
 }
 
+/**
+ * Latest sign-in state and server/channel tree from the engine.
+ *
+ * Cached here because the launch sign-in can finish before the renderer has
+ * loaded and subscribed, and a `webContents.send` with nobody listening is
+ * simply lost. `getState` serves this on init, so the pickers populate whether
+ * the events arrived early, late, or not at all.
+ */
+let discord = { auth: 'idle', botTag: null, message: '', guilds: [] };
+
 /** Compiled slur matcher, rebuilt whenever the filter settings change. */
 let wordFilter = buildFilter({ enabled: true, custom: [] });
 let maskedTotal = 0;
@@ -168,6 +178,22 @@ function wireEngine() {
         send('chatterlayer:members', members);
         return;
       }
+      case 'auth': {
+        const gone = msg.state === 'error' || msg.state === 'signed-out';
+        discord = {
+          auth: msg.state,
+          message: msg.message || '',
+          botTag: gone ? null : msg.botTag || discord.botTag,
+          // Nothing to pick from once the session is gone.
+          guilds: gone ? [] : discord.guilds,
+        };
+        send('chatterlayer:event', msg);
+        return;
+      }
+      case 'guilds':
+        discord = { ...discord, guilds: msg.guilds, botTag: msg.botTag || discord.botTag };
+        send('chatterlayer:event', msg);
+        return;
       default:
         send('chatterlayer:event', msg);
     }
@@ -194,6 +220,13 @@ async function bootstrap() {
   } catch (err) {
     send('chatterlayer:event', { type: 'server', state: 'error', message: err.message });
   }
+
+  // Sign in straight away so the server and channel pickers are populated
+  // before the user goes looking for them. This only logs the bot in — no
+  // speech model is loaded and no voice channel is joined until Connect.
+  // Side effect worth knowing: the bot shows as online in Discord for as long
+  // as Chatterlayer is open, not just while captioning.
+  if (config.getToken()) engine.signIn(config.getToken());
 }
 
 // ------------------------------------------------------------------- IPC ---
@@ -206,7 +239,21 @@ ipcMain.handle('chatterlayer:getState', () => ({
   modelPath: tryResolveModelPath(config.data.modelPath),
   models: listModels(),
   running: engine.running,
+  discord,
 }));
+
+/**
+ * Sign in, or refresh the channel list if already signed in on this token.
+ * Backs the Refresh/Retry button and the "I just pasted a new token" case —
+ * the engine works out which of those it is.
+ */
+ipcMain.handle('chatterlayer:signIn', (_e, token) => {
+  if (token) config.setToken(token);
+  const activeToken = config.getToken();
+  if (!activeToken) throw new Error('Enter your Discord bot token first.');
+  engine.signIn(activeToken);
+  return true;
+});
 
 ipcMain.handle('chatterlayer:setToken', (_e, token) => {
   config.setToken(token);
@@ -296,13 +343,14 @@ ipcMain.handle('chatterlayer:setColor', (_e, { userId, color }) => {
   return config.toClient();
 });
 
-ipcMain.handle('chatterlayer:start', async (_e, { token, channelId }) => {
+ipcMain.handle('chatterlayer:start', async (_e, { token, channelId, guildId }) => {
   if (token) config.setToken(token);
   if (channelId !== undefined) config.update({ channelId });
+  if (guildId !== undefined) config.update({ guildId });
 
   const activeToken = config.getToken();
   if (!activeToken) throw new Error('Enter your Discord bot token first.');
-  if (!config.data.channelId) throw new Error('Enter the voice channel ID first.');
+  if (!config.data.channelId) throw new Error('Pick a voice channel first.');
 
   await engine.start({
     token: activeToken,

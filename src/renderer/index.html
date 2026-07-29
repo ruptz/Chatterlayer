@@ -50,6 +50,25 @@
             </div>
 
             <div class="field">
+              <label class="label" for="guild">Server</label>
+              <div class="input-row">
+                <select id="guild"></select>
+                <button type="button" class="btn btn-sm" id="refresh-guilds">
+                  Refresh
+                </button>
+              </div>
+              <p class="help" id="auth-note">Signing in&hellip;</p>
+            </div>
+          </div>
+
+          <div class="field channel-field">
+            <label class="label" for="voice-channel">Voice channel</label>
+            <select id="voice-channel"></select>
+            <p class="help" id="channel-note">
+              Only channels your bot can join are selectable.
+            </p>
+
+            <div class="manual" id="manual-channel" hidden>
               <label class="label" for="channel">Voice channel ID</label>
               <input
                 type="text"
@@ -58,8 +77,13 @@
                 autocomplete="off"
                 spellcheck="false"
               />
-              <p class="help">Requires Developer Mode in Discord.</p>
+              <p class="help">
+                Requires Developer Mode in Discord. Overrides the pickers above.
+              </p>
             </div>
+            <button type="button" class="linky" id="toggle-manual">
+              Enter a channel ID manually
+            </button>
           </div>
 
           <div class="field model-field">

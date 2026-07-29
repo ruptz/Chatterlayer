@@ -211,6 +211,117 @@ test('all source files parse', () => {
   assert.ok(files.length > 8, `only found ${files.length} source files`);
 });
 
+// --- channel picker ------------------------------------------------------
+
+const { ChannelType, PermissionsBitField } = require('discord.js');
+const { ChatterlayerEngine } = require('../src/engine/engine');
+
+console.log('\nchannel picker');
+
+const F = PermissionsBitField.Flags;
+const BOT = { id: 'bot-1', tag: 'Chatterlayer#0001' };
+
+/** `granted: null` stands in for "the bot's own member isn't cached". */
+function fakeChannel({ name = 'general', granted = [F.ViewChannel, F.Connect], ...rest } = {}) {
+  return {
+    id: `c-${name}`,
+    name,
+    type: ChannelType.GuildVoice,
+    rawPosition: 0,
+    userLimit: 0,
+    members: { size: 0 },
+    permissionsFor: () =>
+      granted === null ? null : { has: (flag) => granted.includes(flag) },
+    ...rest,
+  };
+}
+
+const picker = new ChatterlayerEngine(() => {});
+const describe = (ch) => picker.describeChannel(ch, BOT);
+
+test('a channel the bot can see and connect to is joinable', () => {
+  const c = describe(fakeChannel());
+  assert.strictEqual(c.canJoin, true);
+  assert.strictEqual(c.reason, '');
+});
+
+test('missing Connect is reported, and names the permission', () => {
+  const c = describe(fakeChannel({ granted: [F.ViewChannel] }));
+  assert.strictEqual(c.canJoin, false);
+  assert.ok(/Connect/.test(c.reason), c.reason);
+  assert.ok(!/View Channel/.test(c.reason), c.reason);
+});
+
+test('missing both permissions names both', () => {
+  const c = describe(fakeChannel({ granted: [] }));
+  assert.strictEqual(c.canJoin, false);
+  assert.ok(/View Channel/.test(c.reason) && /Connect/.test(c.reason), c.reason);
+});
+
+test('uncached bot member reads as unknown, never as "cannot join"', () => {
+  // A false negative here would grey out a channel that actually works, which
+  // is worse than showing no verdict at all.
+  const c = describe(fakeChannel({ granted: null }));
+  assert.strictEqual(c.canJoin, null);
+  assert.strictEqual(c.reason, '');
+});
+
+test('stage channels are flagged so the audience trap is visible', () => {
+  const c = describe(fakeChannel({ type: ChannelType.GuildStageVoice }));
+  assert.strictEqual(c.stage, true);
+  // Still joinable — it just will not hear anything until promoted.
+  assert.strictEqual(c.canJoin, true);
+});
+
+test('a channel at its user limit is flagged as full', () => {
+  const c = describe(fakeChannel({ userLimit: 2, members: { size: 2 } }));
+  assert.strictEqual(c.full, true);
+});
+
+test('user limit does not apply to a bot that can move members', () => {
+  const c = describe(
+    fakeChannel({
+      userLimit: 2,
+      members: { size: 2 },
+      granted: [F.ViewChannel, F.Connect, F.MoveMembers],
+    })
+  );
+  assert.strictEqual(c.full, false);
+});
+
+test('the guild tree lists voice channels only, and drops empty servers', () => {
+  const guild = (name, channels) => [name, { id: `g-${name}`, name, channels: { cache: new Map(channels.map((c, i) => [i, c])) } }];
+  const engine = new ChatterlayerEngine(() => {});
+  engine.client = {
+    isReady: () => true,
+    user: BOT,
+    guilds: {
+      cache: new Map([
+        guild('Zebra', [fakeChannel({ name: 'voice' })]),
+        guild('Alpha', [
+          fakeChannel({ name: 'talk' }),
+          fakeChannel({ name: 'rules', type: ChannelType.GuildText }),
+        ]),
+        guild('Textonly', [fakeChannel({ name: 'chat', type: ChannelType.GuildText })]),
+      ].map(([, g]) => [g.id, g])),
+    },
+  };
+
+  let payload = null;
+  engine.emit = (msg) => {
+    if (msg.type === 'guilds') payload = msg;
+  };
+  engine.emitGuilds();
+
+  assert.ok(payload, 'no guilds event emitted');
+  assert.deepStrictEqual(
+    payload.guilds.map((g) => g.name),
+    ['Alpha', 'Zebra'],
+    'servers should be sorted by name, with text-only servers dropped'
+  );
+  assert.deepStrictEqual(payload.guilds[0].channels.map((c) => c.name), ['talk']);
+});
+
 // --- word filter ---------------------------------------------------------
 
 const { buildFilter, maskText } = require('../src/shared/wordfilter');
