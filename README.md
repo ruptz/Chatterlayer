@@ -696,7 +696,7 @@ scripts/
   setup-vosk.js   Downloads runtime + model
   test-vosk.js    Transcribe a WAV to verify the engine
   bench.js        RAM and CPU report
-  selftest.js     Audio, colour and wiring checks
+  selftest.js     Audio, colour, wiring and version-check tests
 ```
 
 ## Shipping a release
@@ -714,6 +714,26 @@ git push origin v1.0.1
 That triggers `release.yml`, which builds all three platforms in parallel and
 opens a **draft** GitHub Release with everything attached. Review it, then hit
 publish.
+
+### How users find out
+
+The running version is stamped in the top-right of the control panel. Once a
+day Chatterlayer asks GitHub whether a newer release exists; if there is one,
+the stamp lights amber and opens the release page when clicked.
+
+Nothing is downloaded and nothing self-installs — see the comment at the top of
+`src/main/updates.js` for why. The short version: the binaries are unsigned,
+which rules out macOS auto-update entirely, and neither the portable `.exe` nor
+the `.deb` can replace themselves. A link works for every build we ship.
+
+Two things worth knowing:
+
+- **Drafts are invisible to it.** The check reads GitHub's *latest published
+  release*, which excludes drafts and prereleases. Nobody is notified until you
+  actually hit publish on the draft the workflow opened.
+- **It's the only request Chatterlayer makes on its own** — everything else is
+  Discord and localhost. It's a visible setting for that reason: **Output →
+  Check for updates**, on by default. Switched off, no request is made at all.
 
 ### Why not build all three locally?
 

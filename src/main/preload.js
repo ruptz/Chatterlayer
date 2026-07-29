@@ -22,6 +22,8 @@ contextBridge.exposeInMainWorld('chatterlayer', {
   removeModel: (key) => ipcRenderer.invoke('chatterlayer:removeModel', key),
   onModelProgress: (cb) => ipcRenderer.on('chatterlayer:modelProgress', (_e, p) => cb(p)),
 
+  checkUpdate: (opts) => ipcRenderer.invoke('chatterlayer:checkUpdate', opts || {}),
+
   copy: (text) => ipcRenderer.invoke('chatterlayer:copy', text),
   openExternal: (url) => ipcRenderer.invoke('chatterlayer:openExternal', url),
   revealConfig: () => ipcRenderer.invoke('chatterlayer:revealConfig'),

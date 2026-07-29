@@ -24,6 +24,7 @@ const {
 } = require('../shared/paths');
 const { catalogWithStatus, installModel, removeModel } = require('../shared/models');
 const { buildFilter, maskText } = require('../shared/wordfilter');
+const { checkForUpdate, RELEASES_PAGE } = require('./updates');
 
 let mainWindow = null;
 let config = null;
@@ -240,7 +241,35 @@ ipcMain.handle('chatterlayer:getState', () => ({
   models: listModels(),
   running: engine.running,
   discord,
+  version: app.getVersion(),
+  releasesUrl: RELEASES_PAGE,
 }));
+
+/**
+ * Ask GitHub whether a newer release exists. Notification only — nothing is
+ * downloaded. `force` comes from the user switching the setting on and skips
+ * the once-a-day throttle.
+ */
+ipcMain.handle('chatterlayer:checkUpdate', async (_e, { force = false } = {}) => {
+  const result = await checkForUpdate({
+    currentVersion: app.getVersion(),
+    cache: config.data.updates,
+    force,
+  });
+  // Remember what we saw so tomorrow's launch doesn't ask again, and so an
+  // offline launch still shows the badge. A check that was refused ('off')
+  // knows nothing, and must not erase what the last real one found.
+  if (result.state !== 'off') {
+    config.update({
+      updates: {
+        ...config.data.updates,
+        lastCheck: result.lastCheck,
+        latest: result.latest,
+      },
+    });
+  }
+  return result;
+});
 
 /**
  * Sign in, or refresh the channel list if already signed in on this token.

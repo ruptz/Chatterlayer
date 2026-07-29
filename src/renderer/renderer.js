@@ -49,6 +49,9 @@ const el = {
   log: $('log'),
   clearLog: $('clear-log'),
   donate: $('donate'),
+  build: $('build'),
+  buildVersion: $('build-version'),
+  checkUpdates: $('check-updates'),
   vFont: $('v-font'),
   vLife: $('v-life'),
   vLines: $('v-lines'),
@@ -60,6 +63,10 @@ let state = {
   running: false,
   /** Sign-in state and the server/channel tree the pickers are built from. */
   discord: { auth: 'idle', botTag: null, message: '', guilds: [] },
+  /** Running version and where to send someone who wants a newer one. */
+  version: '',
+  releasesUrl: 'https://github.com/ruptz/Chatterlayer/releases/latest',
+  update: null,
 };
 /** userId -> the monitor line currently showing that speaker's partial text. */
 const partials = new Map();
@@ -720,6 +727,58 @@ function syncFaderLabels() {
   el.vLines.textContent = el.maxLines.value;
 }
 
+// --------------------------------------------------------------- version --
+
+/**
+ * Paint the build stamp. Monochrome while there's nothing to do; amber with a
+ * lamp when a newer release exists. Clicking it always opens the release page,
+ * whatever state it's in.
+ */
+function renderUpdate(update) {
+  const running = state.version ? `v${state.version}` : '—';
+
+  if (update && update.state === 'available' && update.latest) {
+    // Tags are cut as v1.2.3, but don't end up with "1.2.3 available" sitting
+    // next to a "v0.0.5" stamp if one ever isn't.
+    const tag = update.latest.startsWith('v') ? update.latest : `v${update.latest}`;
+    el.build.dataset.state = 'available';
+    el.buildVersion.textContent = `${tag} available`;
+    el.build.title = `You're on ${running} — click to open the release page.`;
+    return;
+  }
+
+  el.build.dataset.state = 'current';
+  el.buildVersion.textContent = running;
+  el.build.title =
+    update && update.state === 'off'
+      ? 'Update checks are off. Click to open the release page.'
+      : 'Click to open the release page on GitHub.';
+}
+
+/**
+ * @param {boolean} announce  log the outcome even when it's uninteresting.
+ *   True when the user asked; false on launch, where a silent failure is
+ *   kinder than telling an offline user their update check didn't work.
+ */
+async function refreshUpdate(announce = false) {
+  let update;
+  try {
+    update = await window.chatterlayer.checkUpdate({ force: announce });
+  } catch {
+    return; // Never let a version check disturb the app.
+  }
+  state.update = update;
+  renderUpdate(update);
+
+  if (update.state === 'available') {
+    log(`Chatterlayer ${update.latest} is out — you're on v${update.current}.`);
+  } else if (announce && update.state === 'current') {
+    log(`You're on the latest build (v${update.current}).`);
+  } else if (announce && update.state === 'error') {
+    log(`Couldn't check for updates: ${update.message}`, 'warn');
+  }
+}
+
 async function init() {
   state = { ...state, ...(await window.chatterlayer.getState()) };
   const c = state.config;
@@ -743,6 +802,7 @@ async function init() {
   el.port.value = c.server.port;
   el.filterEnabled.checked = c.filter.enabled;
   el.filterCustom.value = (c.filter.custom || []).join('\n');
+  el.checkUpdates.checked = c.updates.check;
   syncFaderLabels();
 
   if (state.urls && state.urls.overlay) el.urlOverlay.textContent = state.urls.overlay;
@@ -756,7 +816,12 @@ async function init() {
     : 'No model installed';
 
   renderMembers();
-  log('Chatterlayer ready.');
+  renderUpdate(null);
+  log(`Chatterlayer v${state.version} ready.`);
+
+  // Deliberately not awaited: the window is usable before GitHub answers, and
+  // it's throttled to one real request a day inside the main process.
+  refreshUpdate();
 }
 
 // ------------------------------------------------------------ listeners --
@@ -892,6 +957,27 @@ el.clearLog.addEventListener('click', () => el.log.replaceChildren());
 el.donate.addEventListener('click', () =>
   window.chatterlayer.openExternal('https://ko-fi.com/ruptz')
 );
+
+el.build.addEventListener('click', () =>
+  window.chatterlayer.openExternal(
+    (state.update && state.update.url) || state.releasesUrl
+  )
+);
+
+el.checkUpdates.addEventListener('change', async () => {
+  const on = el.checkUpdates.checked;
+  state.config = await window.chatterlayer.updateConfig({
+    updates: { ...state.config.updates, check: on },
+  });
+  if (on) {
+    // Switching it on is a request for an answer now, not tomorrow.
+    refreshUpdate(true);
+  } else {
+    state.update = { state: 'off' };
+    renderUpdate(state.update);
+    log('Update checks off — Chatterlayer now makes no requests of its own.');
+  }
+});
 
 window.chatterlayer.onModelProgress(onModelProgress);
 window.chatterlayer.onEvent(handleEvent);

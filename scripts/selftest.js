@@ -25,6 +25,25 @@ function test(name, fn) {
   }
 }
 
+/** Same, for a test that has to await. Results print after the sync ones. */
+const pending = [];
+function testAsync(name, fn) {
+  pending.push(
+    Promise.resolve()
+      .then(fn)
+      .then(
+        () => {
+          console.log(`  PASS  ${name}`);
+          passed++;
+        },
+        (err) => {
+          console.error(`  FAIL  ${name}\n        ${err.message}`);
+          failed++;
+        }
+      )
+  );
+}
+
 // --- audio ---------------------------------------------------------------
 
 const { Resampler48kStereoTo16kMono } = require('../src/engine/resample');
@@ -484,7 +503,95 @@ test('workflows do not pin a deprecated Node version', () => {
   }
 });
 
+// --- version check -------------------------------------------------------
+
+const { compareVersions, checkForUpdate, CHECK_INTERVAL_MS } = require('../src/main/updates');
+
+console.log('\nversion check');
+
+const newer = (a, b) => compareVersions(a, b) < 0;
+
+test('a bump in any position reads as newer', () => {
+  assert.ok(newer('0.0.5', '0.0.6'));
+  assert.ok(newer('0.0.5', '0.1.0'));
+  assert.ok(newer('0.9.9', '1.0.0'));
+  // Not string comparison: 10 > 9.
+  assert.ok(newer('1.9.0', '1.10.0'));
+});
+
+test('the same or an older tag is never offered as an update', () => {
+  for (const [running, tag] of [
+    ['1.2.3', '1.2.3'],
+    ['1.2.3', 'v1.2.3'],
+    ['1.2.3', '1.2.2'],
+    ['1.2.3', '0.9.9'],
+  ]) {
+    assert.ok(!newer(running, tag), `${running} -> ${tag}`);
+  }
+});
+
+test('the leading v is optional on either side', () => {
+  assert.ok(newer('v0.0.5', '0.0.6'));
+  assert.ok(newer('0.0.5', 'v0.0.6'));
+});
+
+test('a prerelease is older than its release, and newer than what came before', () => {
+  assert.ok(newer('1.0.0-rc.1', '1.0.0'));
+  assert.ok(!newer('1.0.0', '1.0.0-rc.1'));
+  assert.ok(newer('0.9.0', '1.0.0-rc.1'));
+});
+
+test('a tag we cannot parse never announces itself as an update', () => {
+  // Better to say nothing than to nag about a release that may not exist.
+  for (const tag of ['', 'latest', 'nightly', 'v1.2', 'release-2024']) {
+    assert.ok(!newer('1.2.3', tag), `tag ${JSON.stringify(tag)}`);
+  }
+});
+
+test('update checks are on by default, and the app knows its own version', () => {
+  const { DEFAULTS } = require('../src/main/config');
+  assert.strictEqual(DEFAULTS.updates.check, true);
+  const pkg = require('../package.json');
+  assert.ok(/^\d+\.\d+\.\d+/.test(pkg.version), `package version ${pkg.version}`);
+});
+
+testAsync('switching the check off makes no request at all', async () => {
+  // The privacy promise, so it gets a test: with the setting off, an
+  // unreachable timeout would be the only sign a request had gone out.
+  const result = await checkForUpdate({
+    currentVersion: '1.0.0',
+    cache: { check: false, lastCheck: 0, latest: '' },
+  });
+  assert.strictEqual(result.state, 'off');
+  assert.ok(result.url.startsWith('https://github.com/'), result.url);
+});
+
+testAsync('a recent check is answered from cache, not from GitHub', async () => {
+  const result = await checkForUpdate({
+    currentVersion: '1.0.0',
+    cache: { check: true, lastCheck: Date.now() - 60_000, latest: 'v1.1.0' },
+  });
+  assert.strictEqual(result.state, 'available');
+  assert.strictEqual(result.latest, 'v1.1.0');
+});
+
+testAsync('a cached tag the user has since installed stops being an update', async () => {
+  // The verdict is re-derived on read, so installing 1.1.0 clears the badge
+  // without waiting for the next check to come round.
+  const result = await checkForUpdate({
+    currentVersion: '1.1.0',
+    cache: { check: true, lastCheck: Date.now() - 60_000, latest: 'v1.1.0' },
+  });
+  assert.strictEqual(result.state, 'current');
+});
+
+test('the check interval is a day, not a launch', () => {
+  assert.strictEqual(CHECK_INTERVAL_MS, 24 * 60 * 60 * 1000);
+});
+
 // --- result --------------------------------------------------------------
 
-console.log(`\n${passed} passed, ${failed} failed\n`);
-process.exit(failed === 0 ? 0 : 1);
+Promise.all(pending).then(() => {
+  console.log(`\n${passed} passed, ${failed} failed\n`);
+  process.exit(failed === 0 ? 0 : 1);
+});

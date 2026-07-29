@@ -125,6 +125,72 @@ body {
   line-height: 1.25;
 }
 
+.topbar-end {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* --- build stamp: the running version, marked on the panel like a revision
+   number. Invisible chrome until pointed at — or until there's a newer
+   release, when it takes the same amber the panel uses everywhere else for
+   "worth your attention, not worth interrupting you". ---------------------- */
+
+.build {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 26px;
+  padding: 0 11px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-3);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 0.15s var(--ease), background 0.15s var(--ease),
+    border-color 0.15s var(--ease);
+}
+
+.build .mark {
+  display: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warn);
+  flex: none;
+}
+
+.build:hover {
+  color: var(--text-2);
+  border-color: var(--border-strong);
+}
+
+.build:focus-visible {
+  outline: none;
+  color: var(--text-2);
+  border-color: var(--border-strong);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.12);
+}
+
+.build[data-state="available"] {
+  color: var(--warn);
+  background: rgba(245, 166, 35, 0.07);
+  border-color: rgba(245, 166, 35, 0.28);
+}
+
+.build[data-state="available"]:hover {
+  background: rgba(245, 166, 35, 0.12);
+  border-color: rgba(245, 166, 35, 0.5);
+}
+
+.build[data-state="available"] .mark {
+  display: block;
+}
+
 /* --- status pill: the tally, minimised to a dot and a word --------------- */
 
 .status {

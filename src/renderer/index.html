@@ -19,9 +19,18 @@
         </span>
       </div>
 
-      <div class="status" id="tally" data-state="standby">
-        <span class="dot"></span>
-        <span id="status-text">Standby</span>
+      <div class="topbar-end">
+        <!-- The build stamp: silkscreened panel marking until there's a newer
+             release, at which point it lights amber like any other lamp. -->
+        <button type="button" class="build" id="build" data-state="current">
+          <span class="mark" aria-hidden="true"></span>
+          <span id="build-version">&mdash;</span>
+        </button>
+
+        <div class="status" id="tally" data-state="standby">
+          <span class="dot"></span>
+          <span id="status-text">Standby</span>
+        </div>
       </div>
     </header>
 
@@ -172,6 +181,13 @@
             <label class="label inline" for="port">Port</label>
             <input type="number" id="port" min="1024" max="65535" class="narrow" />
             <span class="spacer"></span>
+            <label
+              class="check"
+              title="Asks GitHub once a day whether a newer release exists. Nothing is downloaded or installed. This is the only request Chatterlayer makes on its own."
+            >
+              <input type="checkbox" id="check-updates" />
+              Check for updates
+            </label>
             <button class="btn btn-ghost btn-sm" id="clear">Clear captions</button>
             <button class="btn btn-ghost btn-sm" id="reveal">Show config file</button>
           </div>
