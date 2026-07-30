@@ -59,10 +59,12 @@ function findLibrary(hint) {
     }
   }
 
+  // Not plain "npm run setup" — that fetches the recommended model, which is a
+  // Moonshine one and does not pull the Vosk runtime down with it.
   throw new Error(
     `Chatterlayer: could not find ${LIB_FILENAME}.\n` +
-      `Run "npm run setup" to download the Vosk runtime, or set ` +
-      `CHATTERLAYER_VOSK_LIB to its location.`
+      `Run "npm run setup -- --runtime-only" to download the Vosk runtime, or ` +
+      `set CHATTERLAYER_VOSK_LIB to its location.`
   );
 }
 

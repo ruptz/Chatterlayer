@@ -7,10 +7,22 @@
  * the user's data directory, since Program Files isn't writable and models are
  * downloaded after install. The main process pins both into the environment
  * (CHATTERLAYER_MODELS_DIR / CHATTERLAYER_VENDOR_DIR) for the engine.
+ *
+ * Model discovery is manifest-driven. Every model the app installs gets a
+ * `chatterlayer-model.json` naming its engine, so a directory on disk is
+ * self-describing and adding a fifth engine needs no changes here. Vosk models
+ * installed before manifests existed are still recognised by their Kaldi layout.
  */
 
 const fs = require('fs');
 const path = require('path');
+
+const {
+  MODEL_CATALOG,
+  findModelByDir,
+  readManifest,
+  looksLikeVoskModel,
+} = require('./models');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
 const WEB_DIR = path.join(PROJECT_ROOT, 'web');
@@ -36,62 +48,150 @@ function vendorDir() {
 /**
  * Known models, most accurate first. Used to auto-pick a default and to order
  * the picker, so installing a better model actually starts being used.
+ *
+ * Kept as an explicit list rather than derived from a field in the catalogue,
+ * because the interesting comparisons are across engines — where Moonshine Base
+ * sits relative to Vosk Gigaspeech is a judgement, and a judgement reads better
+ * as one ordered list than as nine numbers spread over nine entries.
  */
 const MODEL_RANK = [
+  'parakeet-tdt-0.6b-v2-onnx',
+  'whisper-small-en-onnx',
+  'moonshine-base-onnx',
   'vosk-model-en-us-0.42-gigaspeech',
   'vosk-model-en-us-0.22',
+  'whisper-base-en-onnx',
+  'whisper-tiny-en-onnx',
   'vosk-model-en-us-0.22-lgraph',
   'vosk-model-small-en-us-0.15',
 ];
 
-const MODEL_LABELS = {
-  'vosk-model-en-us-0.42-gigaspeech': 'Gigaspeech — best accuracy, very heavy',
-  'vosk-model-en-us-0.22': 'Large — high accuracy, heavy',
-  'vosk-model-en-us-0.22-lgraph': 'Medium — recommended',
-  'vosk-model-small-en-us-0.15': 'Small — fastest, lowest accuracy',
-};
+function formatSize(mb) {
+  return mb >= 1000 ? `${(mb / 1000).toFixed(1)} GB` : `${mb} MB`;
+}
+
+/**
+ * Dropdown labels: name, approximate size, one short note. Generated from the
+ * catalogue so a new model cannot end up in the picker unlabelled.
+ */
+const MODEL_LABELS = Object.fromEntries(
+  MODEL_CATALOG.map((m) => [m.dir, `${m.label} — ${formatSize(m.downloadMB)}, ${m.note}`])
+);
 
 function rankOf(name) {
   const i = MODEL_RANK.indexOf(name);
   return i === -1 ? MODEL_RANK.length : i;
 }
 
-/** A directory is a usable model only if it has the Kaldi layout inside. */
-function looksLikeModel(dir) {
-  return fs.existsSync(path.join(dir, 'conf')) || fs.existsSync(path.join(dir, 'am'));
-}
+/**
+ * Is this directory a usable model, and if so whose?
+ *
+ * @returns {{engine: string, key: string|null, label: string}|null}
+ */
+function identifyModelDir(dir) {
+  const name = path.basename(dir);
+  const catalogued = findModelByDir(name);
 
-/** Every installed model, best-first. */
-function listModels() {
-  const dir = modelsDir();
-  if (!fs.existsSync(dir)) return [];
-  return fs
-    .readdirSync(dir, { withFileTypes: true })
-    .filter((d) => d.isDirectory() && d.name.startsWith('vosk-model'))
-    .map((d) => ({ name: d.name, path: path.join(dir, d.name) }))
-    .filter((m) => looksLikeModel(m.path))
-    .map((m) => ({ ...m, label: MODEL_LABELS[m.name] || m.name }))
-    .sort((a, b) => rankOf(a.name) - rankOf(b.name) || a.name.localeCompare(b.name));
+  const manifest = readManifest(dir);
+  if (manifest) {
+    return {
+      engine: manifest.engine,
+      key: manifest.key || (catalogued && catalogued.key) || null,
+      label: MODEL_LABELS[name] || manifest.label || name,
+    };
+  }
+
+  // Installed by an older build, or by hand: only Vosk models are identifiable
+  // from their layout alone, and only those ever shipped without a manifest.
+  if (looksLikeVoskModel(dir)) {
+    return {
+      engine: 'vosk',
+      key: catalogued ? catalogued.key : null,
+      label: MODEL_LABELS[name] || name,
+    };
+  }
+
+  return null;
 }
 
 /**
- * Find the Vosk model directory.
+ * Every installed model, best-first.
+ *
+ * @returns {{name: string, path: string, label: string, engine: string,
+ *            key: string|null, maxSpeakers: number|null}[]}
+ */
+function listModels() {
+  const dir = modelsDir();
+  if (!fs.existsSync(dir)) return [];
+
+  return fs
+    .readdirSync(dir, { withFileTypes: true })
+    .filter((d) => d.isDirectory())
+    .map((d) => {
+      const full = path.join(dir, d.name);
+      const identity = identifyModelDir(full);
+      if (!identity) return null;
+      const catalogued = findModelByDir(d.name);
+      return {
+        name: d.name,
+        path: full,
+        ...identity,
+        maxSpeakers: catalogued ? catalogued.maxSpeakers : null,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => rankOf(a.name) - rankOf(b.name) || a.name.localeCompare(b.name));
+}
+
+/** Back-compatible name: callers only ever asked "is this a model directory". */
+function looksLikeModel(dir) {
+  return identifyModelDir(dir) !== null;
+}
+
+/**
+ * Resolve which model to load, as a full descriptor — the engine has to come
+ * along with the path, or the worker would have to guess how to open it.
+ *
  *   1. CHATTERLAYER_MODEL env var
  *   2. explicit override (chosen in the app)
  *   3. the most accurate installed model
+ *
+ * @param {string} [override] path to a model directory
  */
-function resolveModelPath(override) {
+function resolveModel(override) {
   const candidates = [process.env.CHATTERLAYER_MODEL, override].filter(Boolean);
-  for (const c of candidates) {
-    if (fs.existsSync(c)) return path.resolve(c);
+
+  for (const candidate of candidates) {
+    if (!fs.existsSync(candidate)) continue;
+    const full = path.resolve(candidate);
+    const identity = identifyModelDir(full);
+    if (!identity) {
+      throw new Error(
+        `Chatterlayer: "${full}" does not look like a speech model Chatterlayer ` +
+          `can open. Pick one from the Speech model panel.`
+      );
+    }
+    const catalogued = findModelByDir(path.basename(full));
+    return {
+      name: path.basename(full),
+      path: full,
+      ...identity,
+      maxSpeakers: catalogued ? catalogued.maxSpeakers : null,
+    };
   }
+
   const installed = listModels();
-  if (installed.length) return installed[0].path;
+  if (installed.length) return installed[0];
 
   throw new Error(
     'Chatterlayer: no speech model installed yet. Open Chatterlayer and download ' +
       'one from the Speech model panel (or run "npm run setup" from source).'
   );
+}
+
+/** Just the directory. Kept for the Vosk-specific scripts. */
+function resolveModelPath(override) {
+  return resolveModel(override).path;
 }
 
 /** Non-throwing variant for UI status checks. */
@@ -108,10 +208,13 @@ module.exports = {
   WEB_DIR,
   MODEL_LABELS,
   MODEL_RANK,
+  formatSize,
   modelsDir,
   vendorDir,
   listModels,
+  identifyModelDir,
   looksLikeModel,
+  resolveModel,
   resolveModelPath,
   tryResolveModelPath,
 };

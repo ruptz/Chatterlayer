@@ -19,6 +19,14 @@ files:
   - '!**/*.map'
   - '!**/{.DS_Store,Thumbs.db}'
 
+  # onnxruntime-node installs 246 MB: a CPU library for all six
+  # platform/arch combinations, plus a DirectML provider. Chatterlayer asks for
+  # the CPU execution provider only (see src/engine/stt/onnx.js), so the GPU
+  # libraries are 38 MB of dead weight on Windows alone. The per-platform
+  # sections below drop the architectures not being built.
+  - '!node_modules/onnxruntime-node/bin/napi-v6/*/*/{DirectML,dxcompiler,dxil}.dll'
+  - '!node_modules/onnxruntime-node/{script,dist/**/*.map}'
+
 # libvosk ships inside the installer:
 #   - every speech model needs it, so downloading it later only adds a way to fail
 #   - it is platform-specific, so it must be chosen at build time
@@ -43,9 +51,15 @@ asar: true
 # Native binaries must be unpacked to be loadable. electron-builder's smart
 # unpacking usually catches these, but koffi and davey are stated explicitly
 # because a miss here fails at runtime, not at build time.
+#
+# onnxruntime-node needs the whole directory, not just the .node file: the
+# binding pulls in onnxruntime.dll as an ordinary shared-library dependency, so
+# the OS loader has to find it as a real file next to the binding. Unpacking
+# only '**/*.node' leaves the library inside the asar and loading fails.
 asarUnpack:
   - '**/node_modules/koffi/**'
   - '**/node_modules/@snazzah/**'
+  - '**/node_modules/onnxruntime-node/**'
   - '**/*.node'
 
 win:
@@ -56,6 +70,9 @@ win:
       arch: [x64]
   icon: build/icon.png
   artifactName: ${productName}-${version}-Setup.${ext}
+  files:
+    - '!node_modules/onnxruntime-node/bin/napi-v6/{darwin,linux}/**'
+    - '!node_modules/onnxruntime-node/bin/napi-v6/win32/arm64/**'
 
 nsis:
   # A normal installer rather than a one-click one: streamers often want to
@@ -80,6 +97,8 @@ mac:
       arch: [x64, arm64]
   icon: build/icon.png
   category: public.app-category.utilities
+  files:
+    - '!node_modules/onnxruntime-node/bin/napi-v6/{win32,linux}/**'
 
 linux:
   target:
@@ -90,6 +109,9 @@ linux:
   icon: build/icon.png
   category: AudioVideo
   maintainer: ruptz
+  files:
+    - '!node_modules/onnxruntime-node/bin/napi-v6/{win32,darwin}/**'
+    - '!node_modules/onnxruntime-node/bin/napi-v6/linux/arm64/**'
 
 publish:
   - provider: github

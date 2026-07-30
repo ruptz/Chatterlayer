@@ -1,10 +1,14 @@
 'use strict';
 /**
  * Discord bot: receives per-user voice, decodes Opus, resamples to 16 kHz mono
- * and feeds a Vosk worker thread. Speaks a small JSON protocol over process IPC
+ * and feeds a speech worker thread. Speaks a small JSON protocol over process IPC
  * — see `handleCommand`.
  *
- * Runs as a child process so FFI modules load against plain Node rather than
+ * Nothing in this file knows which speech engine is loaded. It resolves whichever
+ * model is selected, hands the descriptor to the worker, and receives
+ * `{ userId, text, isFinal }` back — see src/engine/stt/index.js.
+ *
+ * Runs as a child process so native modules load against plain Node rather than
  * Electron's ABI, a bot crash can't take the window down, and it can be driven
  * headless (`npm run engine:headless`).
  */
@@ -28,12 +32,13 @@ const {
 const prism = require('prism-media');
 
 const { Resampler48kStereoTo16kMono } = require('./resample');
-const { resolveModelPath } = require('../shared/paths');
+const { resolveModel } = require('../shared/paths');
 
 /** Discord always sends 48 kHz stereo Opus; 960 samples = 20 ms per frame. */
 const OPUS = { rate: 48000, channels: 2, frameSize: 960 };
 
-// Gigaspeech takes ~33s to load, so the model timeout is generous.
+// Gigaspeech takes ~33s to load and Parakeet has 2.5 GB of weights to read off
+// disk, so the model timeout is generous.
 const MODEL_LOAD_TIMEOUT_MS = 300_000;
 const GATEWAY_READY_TIMEOUT_MS = 30_000;
 
@@ -77,21 +82,31 @@ class ChatterlayerEngine {
     this.signingIn = null;
     /** Token behind the live session, so a changed one forces a real re-login. */
     this.token = null;
+    /** What the worker reported about the loaded engine, once it is ready. */
+    this.speech = null;
+    /** So the "too many speakers for this model" warning is said once, not per toggle. */
+    this.warnedSpeakerLimit = false;
   }
 
   log(level, message) {
     this.emit({ type: 'log', level, message });
   }
 
-  // ---------------------------------------------------------------- Vosk ---
+  // -------------------------------------------------------------- speech ---
 
   startWorker(modelPath) {
     return new Promise((resolve, reject) => {
-      const resolved = resolveModelPath(modelPath);
-      this.emit({ type: 'vosk', state: 'loading', modelPath: resolved });
+      const model = resolveModel(modelPath);
+      this.emit({
+        type: 'speech',
+        state: 'loading',
+        modelPath: model.path,
+        engine: model.engine,
+        label: model.label,
+      });
 
-      this.worker = new Worker(path.join(__dirname, 'vosk-worker.js'), {
-        workerData: { modelPath: resolved },
+      this.worker = new Worker(path.join(__dirname, 'stt-worker.js'), {
+        workerData: { model },
       });
 
       // Settle exactly once. Without this, a worker that dies during startup
@@ -108,15 +123,16 @@ class ChatterlayerEngine {
         if (settled) return;
         settled = true;
         clearTimeout(loadTimer);
-        this.emit({ type: 'vosk', state: 'error', message });
+        this.emit({ type: 'speech', state: 'error', message });
         reject(new Error(message));
       };
 
       const loadTimer = setTimeout(
         () =>
           fail(
-            `The speech model at "${resolved}" did not finish loading within ` +
-              `${Math.round(MODEL_LOAD_TIMEOUT_MS / 1000)}s. It may be corrupt — re-run "npm run setup".`
+            `The speech model at "${model.path}" did not finish loading within ` +
+              `${Math.round(MODEL_LOAD_TIMEOUT_MS / 1000)}s. It may be corrupt — ` +
+              `remove it in the Speech model panel and download it again.`
           ),
         MODEL_LOAD_TIMEOUT_MS
       );
@@ -125,7 +141,10 @@ class ChatterlayerEngine {
         switch (msg.type) {
           case 'ready':
             this.workerReady = true;
-            this.emit({ type: 'vosk', state: 'ready', ...msg });
+            this.speech = msg;
+            this.warnedSpeakerLimit = false;
+            this.emit({ type: 'speech', state: 'ready', ...msg });
+            this.checkSpeakerLimit();
             return succeed();
           case 'fatal':
             return fail(msg.message);
@@ -140,7 +159,7 @@ class ChatterlayerEngine {
           case 'speakerRemoved':
             return this.emit({ type: 'stats', rss: msg.rss, speakers: this.selected.size });
           case 'error':
-            return this.log('warn', `[vosk] ${msg.message}`);
+            return this.log('warn', `[speech] ${msg.message}`);
           default:
             return undefined;
         }
@@ -176,6 +195,44 @@ class ChatterlayerEngine {
 
   knownName(userId) {
     return this.client?.users?.cache?.get(userId)?.username || null;
+  }
+
+  /**
+   * Say something when more people are toggled on than the loaded model can
+   * realistically keep up with.
+   *
+   * Memory is not the constraint — every engine here loads its model once and
+   * shares it, so a seventh speaker costs an audio buffer. CPU is, and the way it
+   * runs out is captions arriving several seconds after the words. Better to warn
+   * than to let someone conclude the app is broken.
+   */
+  checkSpeakerLimit() {
+    const limit = this.speech && this.speech.maxSpeakers;
+    if (!limit) return;
+
+    if (this.selected.size <= limit) {
+      // Back within budget — re-arm, so a second excursion is worth mentioning
+      // again. Without this the warning fires once per connection and someone who
+      // toggled people off and on would never hear about it twice.
+      this.warnedSpeakerLimit = false;
+      return;
+    }
+    if (this.warnedSpeakerLimit) return;
+    this.warnedSpeakerLimit = true;
+
+    // The descriptor label carries the size and the note for the picker
+    // ("Whisper Base — 79 MB, good accuracy…"); only the name belongs in a
+    // sentence.
+    const name =
+      (this.speech.modelLabel || '').split(' — ')[0] ||
+      this.speech.engineLabel ||
+      'this model';
+    this.log(
+      'warn',
+      `${this.selected.size} speakers are on, but ${name} is only comfortable with ` +
+        `about ${limit} at once on a typical CPU. Captions may start arriving late — ` +
+        `switch to a lighter model or caption fewer people.`
+    );
   }
 
   // ------------------------------------------------------------- Discord ---
@@ -452,8 +509,10 @@ class ChatterlayerEngine {
     }
     this.receiver = this.connection.receiver;
 
-    // Vosk does its own endpointing, but flushing on Discord's signal makes
-    // trailing words appear without waiting for a packet that may never come.
+    // Vosk finds utterance boundaries itself; the other engines have to be told
+    // where one ends. Either way Discord's own signal is the best evidence we
+    // get, and it makes trailing words appear without waiting for a packet that
+    // may never come.
     this.receiver.speaking.on('end', (userId) => {
       if (this.selected.has(userId) && this.workerReady) {
         this.worker.postMessage({ type: 'flush', userId });
@@ -590,6 +649,7 @@ class ChatterlayerEngine {
       if (!this.streams.has(userId)) this.setupStream(userId);
     }
     this.emitMembers();
+    this.checkSpeakerLimit();
     this.emit({ type: 'stats', speakers: this.selected.size });
   }
 
@@ -626,6 +686,8 @@ class ChatterlayerEngine {
       // Give it a moment to free the model, then force it down.
       setTimeout(() => dying.terminate(), 1000).unref();
     }
+    this.speech = null;
+    this.warnedSpeakerLimit = false;
     this.channel = null;
     this.receiver = null;
     this.stopping = false;

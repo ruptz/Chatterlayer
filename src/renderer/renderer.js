@@ -63,6 +63,11 @@ let state = {
   running: false,
   /** Sign-in state and the server/channel tree the pickers are built from. */
   discord: { auth: 'idle', botTag: null, message: '', guilds: [] },
+  /**
+   * The model the worker actually has loaded, as opposed to the one selected in
+   * the dropdown. They differ whenever someone switches models mid-call.
+   */
+  loadedModel: '',
   /** Running version and where to send someone who wants a newer one. */
   version: '',
   releasesUrl: 'https://github.com/ruptz/Chatterlayer/releases/latest',
@@ -305,6 +310,9 @@ function renderMembers() {
 
   const live = state.members.filter((m) => m.selected).length;
   el.speakerCount.textContent = `${live} on`;
+  // Toggling someone on can push the selection past what the model keeps up
+  // with, which the model note is where we say so.
+  updateModelNote();
 
   for (const m of state.members) {
     const li = document.createElement('li');
@@ -469,8 +477,12 @@ function handleEvent(msg) {
       } else if (msg.state === 'stopped' || msg.state === 'disconnected') {
         setTally('standby', 'Standby');
         state.running = false;
+        // The engine has freed the model, so the stamp goes back to describing
+        // the selection rather than what was loaded.
+        state.loadedModel = '';
         state.members = [];
         renderMembers();
+        renderModelPath();
         el.start.disabled = false;
         el.stop.disabled = true;
         log(msg.message);
@@ -512,17 +524,21 @@ function handleEvent(msg) {
       );
       return;
 
-    case 'vosk':
+    case 'speech':
       if (msg.state === 'loading') {
         setTally('linking', 'Loading model');
         // The large models take ~30s. Say so, or it reads as a freeze.
         log(
-          `Loading ${msg.modelPath.split(/[\\/]/).pop()}… ` +
+          `Loading ${modelName(msg.modelPath)}… ` +
             `(large models can take 30s or more)`
         );
       } else if (msg.state === 'ready') {
-        log(`Speech model ready in ${msg.loadMs} ms`);
-        el.modelPath.textContent = msg.modelPath.split(/[\\/]/).pop();
+        log(
+          `${msg.engineLabel} ready in ${msg.loadMs} ms` +
+            (msg.streaming ? '' : ' (transcribes complete phrases)')
+        );
+        state.loadedModel = msg.modelPath;
+        renderModelPath();
       } else if (msg.state === 'error') {
         setTally('fault', 'Model fault');
         log(msg.message, 'error');
@@ -562,15 +578,54 @@ function handleEvent(msg) {
 
 // ----------------------------------------------------------------- init --
 
-/** Rough cost hints so the tradeoff is visible before you pick, not after. */
-const MODEL_HINTS = {
-  'vosk-model-en-us-0.42-gigaspeech':
-    'Best accuracy. ~6.8 GB memory, ~30s to load. Good for a few speakers at once.',
-  'vosk-model-en-us-0.22': 'High accuracy. ~5 GB memory, slow to load.',
-  'vosk-model-en-us-0.22-lgraph': 'Balanced accuracy and speed. ~250 MB memory.',
-  'vosk-model-small-en-us-0.15':
-    'Lightest and fastest. ~150 MB memory. Comfortable with 7 speakers.',
-};
+/**
+ * The catalogue, cached from the main process. The cost hints below are built
+ * from it rather than hardcoded here, so a new model cannot end up in the picker
+ * with no explanation of what it will do to your CPU.
+ */
+let catalog = [];
+
+const byDir = (dirName) => catalog.find((m) => m.dir === dirName) || null;
+
+function formatMB(mb) {
+  return mb >= 1000 ? `${(mb / 1000).toFixed(1)} GB` : `${mb} MB`;
+}
+
+/** A model's directory name — its identity, and what the UI shows. */
+const modelName = (p) => (p || '').split(/[\\/]/).filter(Boolean).pop() || '';
+
+/**
+ * The model stamp in the Source header.
+ *
+ * Two different things want to live there and they are not the same thing. Before
+ * Connect it should say what *will* load; while running it has to say what
+ * actually did, because the model is only loaded at connect time and changing the
+ * dropdown mid-call does not swap it. When those diverge, say so — otherwise
+ * switching models while connected looks like it silently did nothing.
+ */
+function renderModelPath() {
+  const selected = el.model.value || (state.config && state.config.modelPath) || state.modelPath;
+  const effective = state.running && state.loadedModel ? state.loadedModel : selected;
+
+  if (!effective) {
+    el.modelPath.textContent = 'No model installed';
+    el.modelPath.title = '';
+    return;
+  }
+
+  const name = modelName(effective);
+  // Compared by directory name, not by path string. The two sides reach here by
+  // different routes — one from the engine, one from the picker — and a
+  // difference in separators or drive-letter case would otherwise read as "you
+  // switched models" when nothing had changed. Directory names are unique across
+  // the catalogue, so they are the identity that matters.
+  const pending = state.running && state.loadedModel && selected && modelName(selected) !== name;
+
+  el.modelPath.textContent = pending ? `${name} · switch pending` : name;
+  el.modelPath.title = pending
+    ? `Running ${name}. Reconnect to switch to ${modelName(selected)}.`
+    : effective;
+}
 
 function renderModels() {
   const models = state.models || [];
@@ -587,6 +642,7 @@ function renderModels() {
     // user hunt for it.
     el.modelList.hidden = false;
     el.manageModels.textContent = 'Hide';
+    renderModelPath();
     return;
   }
 
@@ -601,14 +657,30 @@ function renderModels() {
   // process already resolved into state.modelPath.
   el.model.value = state.config.modelPath || state.modelPath || models[0].path;
   updateModelNote();
+  // Covers install, remove, and every getState refresh — all of which can change
+  // what is selected without anyone touching the dropdown.
+  renderModelPath();
 }
 
 /** Catalogue rows: download / installed / remove, with a progress bar. */
 async function renderModelCatalog() {
-  const { catalog } = await window.chatterlayer.modelCatalog();
+  const fetched = await window.chatterlayer.modelCatalog();
+  catalog = fetched.catalog;
   el.modelList.replaceChildren();
 
+  let engine = null;
   for (const m of catalog) {
+    // The catalogue spans four speech engines. Grouping them keeps a list of
+    // nine models readable, and makes it obvious that Whisper Tiny and Whisper
+    // Small are the same thing at two sizes.
+    if (m.engine !== engine) {
+      engine = m.engine;
+      const head = document.createElement('li');
+      head.className = 'model-group';
+      head.textContent = m.label.split(' ')[0];
+      el.modelList.appendChild(head);
+    }
+
     const li = document.createElement('li');
     li.className = `model-row${m.installed ? ' installed' : ''}`;
     li.dataset.model = m.key;
@@ -626,9 +698,11 @@ async function renderModelCatalog() {
     }
 
     const size = document.createElement('small');
-    size.textContent = `${m.downloadMB >= 1000 ? (m.downloadMB / 1000).toFixed(1) + ' GB' : m.downloadMB + ' MB'} download · ~${
-      m.ramMB >= 1000 ? (m.ramMB / 1000).toFixed(1) + ' GB' : m.ramMB + ' MB'
-    } memory`;
+    size.textContent =
+      `${formatMB(m.downloadMB)} download · ~${formatMB(m.ramMB)} memory` +
+      (m.maxSpeakers
+        ? ` · ${m.maxSpeakers === 1 ? '1 speaker' : `up to ~${m.maxSpeakers} speakers`}`
+        : '');
 
     const blurb = document.createElement('p');
     blurb.textContent = m.blurb;
@@ -662,6 +736,10 @@ async function renderModelCatalog() {
     li.append(info, action, bar);
     el.modelList.appendChild(li);
   }
+
+  // renderModels() runs first and has no catalogue to describe the selection
+  // from yet, so the note is filled in once it arrives.
+  updateModelNote();
 }
 
 async function downloadModelRow(model, button) {
@@ -713,12 +791,45 @@ function onModelProgress(p) {
   }
 }
 
+/**
+ * What picking this model will cost you, in the same place you pick it.
+ *
+ * The speaker figure is the part people actually need: memory is shared across
+ * speakers on every engine here, so what runs out first is CPU, and the way it
+ * runs out is captions arriving late rather than an error.
+ */
 function updateModelNote() {
-  const name = (el.model.value || '').split(/[\\/]/).pop();
-  const hint = MODEL_HINTS[name] || 'Custom model.';
-  el.modelNote.textContent = state.running
-    ? `${hint} Reconnect to switch models.`
-    : hint;
+  const name = modelName(el.model.value);
+  const model = byDir(name);
+
+  const parts = [];
+  if (model) {
+    parts.push(model.blurb);
+    parts.push(`~${formatMB(model.ramMB)} memory.`);
+    if (model.maxSpeakers) {
+      const live = state.members.filter((m) => m.selected).length;
+      const limit =
+        model.maxSpeakers === 1 ? 'one speaker' : `about ${model.maxSpeakers} speakers`;
+      parts.push(
+        live > model.maxSpeakers
+          ? `You have ${live} on — this model keeps up with ${limit}, so captions may lag.`
+          : `Comfortable with ${limit} at once.`
+      );
+    }
+  } else {
+    parts.push('Custom model.');
+  }
+  if (state.running) parts.push('Reconnect to switch models.');
+
+  el.modelNote.textContent = parts.join(' ');
+  el.modelNote.classList.toggle(
+    'warn',
+    Boolean(
+      model &&
+        model.maxSpeakers &&
+        state.members.filter((m) => m.selected).length > model.maxSpeakers
+    )
+  );
 }
 
 function syncFaderLabels() {
@@ -809,11 +920,6 @@ async function init() {
 
   renderModels();
   renderModelCatalog();
-
-  // Installed builds have no npm, so don't tell people to run it.
-  el.modelPath.textContent = state.modelPath
-    ? state.modelPath.split(/[\\/]/).pop()
-    : 'No model installed';
 
   renderMembers();
   renderUpdate(null);
@@ -925,7 +1031,8 @@ el.manageModels.addEventListener('click', () => {
 el.model.addEventListener('change', async () => {
   state.config = await window.chatterlayer.updateConfig({ modelPath: el.model.value });
   updateModelNote();
-  const name = el.model.value.split(/[\\/]/).pop();
+  renderModelPath();
+  const name = modelName(el.model.value);
   // The model is loaded once at connect time, so a live switch needs a restart.
   log(`Speech model set to ${name}${state.running ? ' — reconnect to apply' : ''}`);
 });

@@ -4,12 +4,32 @@
  * Feeds a WAV through in small chunks, the way live Discord audio arrives.
  *
  *   node scripts/test-vosk.js [path/to/16k-mono.wav]
+ *
+ * Vosk-specific by design — it exercises the FFI binding directly rather than
+ * going through the worker. For any engine, use `npm run test:stt` instead.
  */
 
 const fs = require('fs');
 const path = require('path');
 const { VoskModel, VoskRecognizer, getLibraryPath } = require('../src/engine/vosk-binding');
-const { resolveModelPath } = require('../src/shared/paths');
+const { listModels } = require('../src/shared/paths');
+
+/**
+ * The best installed *Vosk* model. Not `resolveModelPath()`, which now answers
+ * with the best model of any engine — and handing a Parakeet directory to
+ * libvosk is not a useful error message.
+ */
+function resolveVoskModel() {
+  const vosk = listModels().filter((m) => m.engine === 'vosk');
+  if (!vosk.length) {
+    console.error(
+      'No Vosk model installed. Run "npm run setup" for one, or use ' +
+        '"npm run test:stt" to test whatever engine you do have.'
+    );
+    process.exit(1);
+  }
+  return vosk[0].path;
+}
 
 /** Minimal RIFF/WAVE parser: returns { sampleRate, channels, bits, data }. */
 function parseWav(buf) {
@@ -45,7 +65,7 @@ async function main() {
     process.exit(1);
   }
 
-  const modelPath = resolveModelPath();
+  const modelPath = resolveVoskModel();
   console.log('model   :', modelPath);
 
   const t0 = Date.now();

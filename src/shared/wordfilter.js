@@ -54,6 +54,7 @@ const DEFAULT_TERMS = [
   'quadroon',
   'octoroon',
   'tarbaby',
+  'coon',
 ];
 
 /**

@@ -75,3 +75,37 @@ jobs:
             exit 1
           fi
           echo "bundled: $found"
+
+      # The Whisper, Moonshine and Parakeet engines all run on ONNX Runtime. Its
+      # binding loads onnxruntime.dll as an ordinary shared-library dependency, so
+      # both files have to be unpacked from the asar and sitting next to each
+      # other — a miss here fails when a user picks one of those models, not at
+      # build time.
+      - name: Check ONNX Runtime was unpacked next to its binding
+        shell: bash
+        run: |
+          set -e
+          binding=$(find dist -name "onnxruntime_binding.node" | head -1)
+          if [ -z "$binding" ]; then
+            echo "::error::onnxruntime_binding.node is missing from the packaged output"
+            exit 1
+          fi
+          if [ ! -f "$(dirname "$binding")/onnxruntime.dll" ]; then
+            echo "::error::onnxruntime.dll is not beside the binding at $(dirname "$binding")"
+            exit 1
+          fi
+          echo "bundled: $binding"
+
+          # Only the platform being built should ship. Catching this keeps ~200 MB
+          # of other platforms' libraries out of the installer.
+          for other in darwin linux; do
+            if find dist -path "*napi-v6/$other/*" -name "*onnxruntime*" | grep -q .; then
+              echo "::error::$other ONNX Runtime binaries leaked into a Windows build"
+              exit 1
+            fi
+          done
+          if find dist -name "DirectML.dll" | grep -q .; then
+            echo "::error::DirectML.dll was bundled; Chatterlayer only uses the CPU provider"
+            exit 1
+          fi
+          echo "no foreign or GPU ONNX binaries bundled"

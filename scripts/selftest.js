@@ -153,16 +153,91 @@ test('per-user colour is stable across runs', () => {
 const { MODEL_CATALOG, findModel } = require('../src/shared/models');
 const { MODEL_RANK, MODEL_LABELS } = require('../src/shared/paths');
 
+/** Position in the accuracy ranking; lower is better. */
+const rankOfDir = (dir) => MODEL_RANK.indexOf(dir);
+
 console.log('\nspeech models');
 
 test('every catalogue entry is complete and well formed', () => {
   for (const m of MODEL_CATALOG) {
-    for (const field of ['key', 'dir', 'url', 'label', 'downloadMB', 'ramMB', 'blurb']) {
+    for (const field of [
+      'key',
+      'dir',
+      'engine',
+      'label',
+      'note',
+      'downloadMB',
+      'ramMB',
+      'maxSpeakers',
+      'blurb',
+    ]) {
       assert.ok(m[field], `${m.key || '?'} is missing "${field}"`);
     }
-    assert.ok(m.url.startsWith('https://'), `${m.key} url must be https`);
-    assert.ok(m.url.endsWith('.zip'), `${m.key} url must be a .zip`);
-    assert.ok(m.dir.startsWith('vosk-model'), `${m.key} dir looks wrong`);
+    // Exactly one of the two download shapes.
+    assert.ok(
+      Boolean(m.url) !== Boolean(m.files),
+      `${m.key} must have either "url" (a zip) or "files", not both or neither`
+    );
+    if (m.url) {
+      assert.ok(m.url.startsWith('https://'), `${m.key} url must be https`);
+      assert.ok(m.url.endsWith('.zip'), `${m.key} url must be a .zip`);
+    }
+  }
+});
+
+test('per-file downloads pin a revision and declare exact byte sizes', () => {
+  for (const m of MODEL_CATALOG.filter((x) => x.files)) {
+    for (const f of m.files) {
+      assert.ok(f.url.startsWith('https://'), `${m.key}: ${f.as} url must be https`);
+      assert.ok(f.as && !f.as.includes('..'), `${m.key}: bad local name "${f.as}"`);
+      // The size is what makes a truncated download detectable, and what makes
+      // the progress bar honest before any response header arrives.
+      assert.ok(
+        Number.isInteger(f.bytes) && f.bytes > 0,
+        `${m.key}: ${f.as} needs a byte size`
+      );
+      // A 40-character hex revision, not "main" — see the note in models.js.
+      assert.ok(
+        /\/resolve\/[0-9a-f]{40}\//.test(f.url),
+        `${m.key}: ${f.as} must pin a commit, not a branch`
+      );
+    }
+  }
+});
+
+test('keys, aliases and directories are all unique', () => {
+  const seen = new Map();
+  for (const m of MODEL_CATALOG) {
+    for (const name of [m.key, ...(m.aliases || [])]) {
+      assert.ok(!seen.has(name), `"${name}" is used by both ${seen.get(name)} and ${m.key}`);
+      seen.set(name, m.key);
+    }
+  }
+  const dirs = MODEL_CATALOG.map((m) => m.dir);
+  assert.strictEqual(new Set(dirs).size, dirs.length, 'two models share a directory');
+});
+
+test('every catalogue engine has a loader and a descriptor', () => {
+  const { ENGINES, LOADERS, describeEngine } = require('../src/engine/stt');
+  for (const m of MODEL_CATALOG) {
+    assert.ok(LOADERS[m.engine], `no loader for engine "${m.engine}" (${m.key})`);
+    assert.ok(describeEngine(m.engine), `no descriptor for engine "${m.engine}"`);
+  }
+  for (const name of Object.keys(ENGINES)) {
+    assert.ok(LOADERS[name], `engine "${name}" is described but has no loader`);
+  }
+});
+
+test('the ONNX engines share the model rather than copying it per speaker', () => {
+  // The claim the speaker limits rest on. If someone ever changes an ONNX engine
+  // to hold per-speaker weights, perSpeakerMB is the number that should move, and
+  // this is the test that should stop them shipping without noticing.
+  for (const m of MODEL_CATALOG.filter((x) => x.engine !== 'vosk')) {
+    assert.ok(
+      m.perSpeakerMB <= 16,
+      `${m.key} claims ${m.perSpeakerMB} MB per speaker — an ONNX engine should ` +
+        `only be paying for an audio buffer`
+    );
   }
 });
 
@@ -171,8 +246,25 @@ test('exactly one model is marked recommended', () => {
   assert.strictEqual(rec.length, 1, `found ${rec.length}`);
 });
 
-test('the recommended model is the medium one', () => {
-  assert.strictEqual(MODEL_CATALOG.find((m) => m.recommended).dir, 'vosk-model-en-us-0.22-lgraph');
+test('the recommended model is one a typical machine can actually run', () => {
+  // This used to name a specific model, which meant it went stale the moment the
+  // benchmarks disagreed with it. What matters is not which model is recommended
+  // but that the default download is defensible: it has to keep up with a real
+  // call and not be a multi-gigabyte surprise on someone's connection.
+  const rec = MODEL_CATALOG.find((m) => m.recommended);
+  assert.ok(rec.maxSpeakers >= 5, `${rec.label} only manages ${rec.maxSpeakers} speakers`);
+  assert.ok(rec.downloadMB <= 500, `${rec.label} is a ${rec.downloadMB} MB default download`);
+  assert.ok(rec.ramMB <= 1500, `${rec.label} wants ${rec.ramMB} MB of RAM`);
+  // And it should be at least as good as everything lighter than it.
+  for (const m of MODEL_CATALOG) {
+    if (m.downloadMB <= rec.downloadMB && m.maxSpeakers > rec.maxSpeakers) {
+      assert.ok(
+        rankOfDir(m.dir) > rankOfDir(rec.dir),
+        `${m.label} is smaller, handles more speakers, and ranks better than the ` +
+          `recommended ${rec.label}`
+      );
+    }
+  }
 });
 
 test('catalogue keys and aliases all resolve', () => {
@@ -187,6 +279,246 @@ test('every catalogue model appears in the ranking and has a label', () => {
     assert.ok(MODEL_RANK.includes(m.dir), `${m.dir} missing from MODEL_RANK`);
     assert.ok(MODEL_LABELS[m.dir], `${m.dir} missing a label`);
   }
+  assert.strictEqual(MODEL_RANK.length, MODEL_CATALOG.length, 'MODEL_RANK has stale entries');
+});
+
+test('dropdown labels carry a name, a size and a short note', () => {
+  for (const m of MODEL_CATALOG) {
+    const label = MODEL_LABELS[m.dir];
+    assert.ok(label.startsWith(m.label), `"${label}" should start with the model name`);
+    assert.ok(/\d+(\.\d+)? (MB|GB)/.test(label), `"${label}" has no size`);
+    assert.ok(label.endsWith(m.note), `"${label}" should end with the note`);
+    // It sits in a <select>; anything much longer gets clipped.
+    assert.ok(label.length <= 64, `"${label}" is ${label.length} chars, too long for the picker`);
+  }
+});
+
+// --- speech front end ----------------------------------------------------
+
+const { Radix2, Dft } = require('../src/engine/stt/fft');
+const { WhisperFeatures, melFilterbank, hzToMel, melToHz } = require('../src/engine/stt/features');
+
+console.log('\nspeech front end');
+
+/** Reference implementation: O(n^2) and obviously correct. */
+function directPowerSpectrum(x) {
+  const n = x.length;
+  const out = new Float64Array((n >> 1) + 1);
+  for (let k = 0; k < out.length; k++) {
+    let re = 0;
+    let im = 0;
+    for (let j = 0; j < n; j++) {
+      const a = (-2 * Math.PI * j * k) / n;
+      re += x[j] * Math.cos(a);
+      im += x[j] * Math.sin(a);
+    }
+    out[k] = re * re + im * im;
+  }
+  return out;
+}
+
+function testSignal(n) {
+  const x = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    x[i] = Math.sin(i * 0.31) * 0.7 + Math.cos(i * 1.73) * 0.3 + ((i % 37) - 18) / 60;
+  }
+  return x;
+}
+
+test('the 400-point DFT matches a direct DFT (Whisper’s window size)', () => {
+  // 400 is 2^4 * 5^2, so this is the Bluestein path. If it is wrong, every mel
+  // filter reads the wrong frequencies and accuracy quietly collapses.
+  const x = testSignal(400);
+  const mine = new Float64Array(201);
+  new Dft(400).powerSpectrum(x, mine);
+  const ref = directPowerSpectrum(x);
+  let worst = 0;
+  for (let k = 0; k < ref.length; k++) {
+    worst = Math.max(worst, Math.abs(mine[k] - ref[k]) / (ref[k] + 1e-9));
+  }
+  assert.ok(worst < 1e-8, `max relative error ${worst.toExponential(2)}`);
+});
+
+test('a power-of-two length takes the same path to the same answer', () => {
+  const x = testSignal(512);
+  const mine = new Float64Array(257);
+  new Dft(512).powerSpectrum(x, mine);
+  const ref = directPowerSpectrum(x);
+  for (let k = 0; k < ref.length; k++) {
+    assert.ok(Math.abs(mine[k] - ref[k]) / (ref[k] + 1e-9) < 1e-8, `bin ${k}`);
+  }
+});
+
+test('the radix-2 FFT round-trips through its inverse', () => {
+  const fft = new Radix2(256);
+  const re = Float64Array.from(testSignal(256));
+  const im = new Float64Array(256);
+  const original = Float64Array.from(re);
+  fft.forward(re, im);
+  fft.inverse(re, im);
+  for (let i = 0; i < 256; i++) {
+    assert.ok(Math.abs(re[i] - original[i]) < 1e-10, `sample ${i}`);
+    assert.ok(Math.abs(im[i]) < 1e-10, `imaginary residue at ${i}`);
+  }
+});
+
+test('the mel scale is invertible and linear below 1 kHz', () => {
+  for (const hz of [0, 100, 500, 999, 1000, 2000, 4000, 8000]) {
+    assert.ok(Math.abs(melToHz(hzToMel(hz)) - hz) < 1e-6, `${hz} Hz`);
+  }
+  // Slaney: 200/3 Hz per mel in the linear region.
+  assert.ok(Math.abs(hzToMel(200) - 3) < 1e-9);
+});
+
+test('the mel filterbank is triangular, ordered and area-normalised', () => {
+  const { filters, bins } = melFilterbank({ sampleRate: 16000, nFft: 400, nMels: 80 });
+  assert.strictEqual(bins, 201);
+  assert.strictEqual(filters.length, 80 * 201);
+
+  let previousPeak = -1;
+  let lowPeak = 0;
+  let highPeak = 0;
+  for (let m = 0; m < 80; m++) {
+    const row = filters.subarray(m * bins, (m + 1) * bins);
+    let sum = 0;
+    let peak = 0;
+    let peakAt = -1;
+    for (let b = 0; b < bins; b++) {
+      assert.ok(row[b] >= 0, `filter ${m} bin ${b} is negative`);
+      sum += row[b];
+      if (row[b] > peak) {
+        peak = row[b];
+        peakAt = b;
+      }
+    }
+    assert.ok(sum > 0, `filter ${m} is empty`);
+    // Non-decreasing rather than increasing: below 1 kHz the mel spacing (~35 Hz
+    // for 80 filters) is finer than the FFT bin spacing (40 Hz at n_fft=400), so
+    // neighbouring low filters legitimately peak on the same bin.
+    assert.ok(peakAt >= previousPeak, `filter ${m} sits below filter ${m - 1}`);
+    previousPeak = peakAt;
+    if (m < 10) lowPeak = Math.max(lowPeak, peak);
+    if (m >= 70) highPeak = Math.max(highPeak, peak);
+  }
+
+  // Slaney normalisation is equal area, not equal peak, so the wide filters at
+  // the top of the range must peak lower than the narrow ones at the bottom.
+  // Getting this wrong tilts the whole spectrum and quietly costs accuracy.
+  assert.ok(highPeak < lowPeak, `high filters peak at ${highPeak}, low at ${lowPeak}`);
+});
+
+test('log-mel output is the right shape, and the padding columns are identical', () => {
+  const features = new WhisperFeatures({});
+  // Two seconds of audio into a 30-second window: most of it is padding.
+  const audio = new Float32Array(32000);
+  for (let i = 0; i < audio.length; i++) audio[i] = Math.sin((2 * Math.PI * 300 * i) / 16000) * 0.4;
+
+  const mel = features.compute(audio, 3000);
+  assert.strictEqual(mel.length, 80 * 3000);
+
+  // Every value lands in Whisper's normalised range.
+  for (let i = 0; i < mel.length; i++) {
+    assert.ok(mel[i] >= -1.01 && mel[i] <= 1.51, `value ${mel[i]} at ${i} is out of range`);
+  }
+
+  // Frames past the end of the audio are windows of zeros, so they must all be
+  // the same value — this is the shortcut that makes a short utterance cheap.
+  const lastReal = Math.ceil((audio.length + 200) / 160);
+  for (let m = 0; m < 80; m++) {
+    const base = m * 3000;
+    const pad = mel[base + lastReal + 5];
+    for (let t = lastReal + 5; t < 3000; t++) {
+      assert.strictEqual(mel[base + t], pad, `mel ${m} frame ${t} differs from the padding`);
+    }
+  }
+});
+
+test('log-mel finds a tone where the tone actually is', () => {
+  const features = new WhisperFeatures({});
+  const audio = new Float32Array(16000);
+  for (let i = 0; i < audio.length; i++) audio[i] = Math.sin((2 * Math.PI * 1000 * i) / 16000) * 0.5;
+  const mel = features.compute(audio, 200);
+
+  // Energy at frame 50 should peak in the mel band containing 1 kHz.
+  let best = -1;
+  let bestVal = -Infinity;
+  for (let m = 0; m < 80; m++) {
+    const v = mel[m * 200 + 50];
+    if (v > bestVal) {
+      bestVal = v;
+      best = m;
+    }
+  }
+  const { filters, bins } = melFilterbank({ sampleRate: 16000, nFft: 400, nMels: 80 });
+  const binFor1k = Math.round((1000 * 400) / 16000);
+  assert.ok(
+    filters[best * bins + binFor1k] > 0,
+    `loudest mel band ${best} does not cover 1 kHz`
+  );
+});
+
+// --- detokenisers --------------------------------------------------------
+
+const { fromTokenizerJson, fromVocabTxt } = require('../src/engine/stt/tokenizer');
+
+console.log('\ndetokenisers');
+
+/** Write a fixture into the scratch area and hand back the path. */
+function fixture(name, contents) {
+  const dir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'chatterlayer-test-'));
+  const file = path.join(dir, name);
+  fs.writeFileSync(file, contents);
+  return file;
+}
+
+test('ByteLevel BPE decodes to text, with specials dropped (Whisper)', () => {
+  // "Ġ" is how ByteLevel stores a leading space.
+  const file = fixture(
+    'tokenizer.json',
+    JSON.stringify({
+      model: { type: 'BPE', vocab: { Hello: 0, 'Ġworld': 1, '!': 2 } },
+      added_tokens: [{ id: 3, content: '<|endoftext|>', special: true }],
+      decoder: { type: 'ByteLevel' },
+    })
+  );
+  const detok = fromTokenizerJson(file);
+  assert.strictEqual(detok.decode([0, 1, 2, 3]), 'Hello world!');
+  assert.strictEqual(detok.decode([0, 1, 2, 3], { skipSpecial: false }), 'Hello world!<|endoftext|>');
+});
+
+test('SentencePiece with byte fallback reassembles multi-byte characters (Moonshine)', () => {
+  // "é" is 0xC3 0xA9: two byte-fallback tokens that only make sense together, so
+  // decoding token by token would produce two replacement characters.
+  const file = fixture(
+    'tokenizer.json',
+    JSON.stringify({
+      model: {
+        type: 'BPE',
+        vocab: { '▁caf': 0, '<0xC3>': 1, '<0xA9>': 2, '▁open': 3 },
+      },
+      added_tokens: [{ id: 4, content: '</s>', special: true }],
+      decoder: {
+        type: 'Sequence',
+        decoders: [
+          { type: 'Replace', pattern: { String: '▁' }, content: ' ' },
+          { type: 'ByteFallback' },
+          { type: 'Fuse' },
+          { type: 'Strip', content: ' ', start: 1, stop: 0 },
+        ],
+      },
+    })
+  );
+  const detok = fromTokenizerJson(file);
+  // The leading space is stripped, as the Strip step says.
+  assert.strictEqual(detok.decode([0, 1, 2, 3, 4]), 'café open');
+});
+
+test('a NeMo vocab.txt decodes with metaspace word boundaries (Parakeet)', () => {
+  const file = fixture('vocab.txt', '<unk> 0\n▁hello 1\n▁wor 2\nld 3\n<blk> 4\n');
+  const detok = fromVocabTxt(file);
+  assert.strictEqual(detok.decode([1, 2, 3]), 'hello world');
+  // The blank is never emitted by the search, but must not survive if it is.
+  assert.strictEqual(detok.decode([1, 4]), 'hello');
 });
 
 // --- renderer wiring -----------------------------------------------------
@@ -452,6 +784,161 @@ test('handles empty and malformed input', () => {
 test('filter is on by default in the shipped config', () => {
   const { DEFAULTS } = require('../src/main/config');
   assert.strictEqual(DEFAULTS.filter.enabled, true);
+});
+
+// --- utterance segmentation ----------------------------------------------
+
+const { Segmenter } = require('../src/engine/stt/segmenter');
+
+console.log('\nutterance segmentation');
+
+const SR = 16000;
+
+function tone(seconds, amplitude = 0.3) {
+  const n = Math.round(SR * seconds);
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) out[i] = Math.sin((2 * Math.PI * 220 * i) / SR) * amplitude;
+  return out;
+}
+
+function quiet(seconds, amplitude = 0.0002) {
+  const n = Math.round(SR * seconds);
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) out[i] = (Math.random() * 2 - 1) * amplitude;
+  return out;
+}
+
+/**
+ * Feed audio the way the worker does: 20 ms at a time, and acting on each
+ * verdict. Acting matters — poll() keeps saying 'final' until the buffer is
+ * taken, so a helper that only observed would report a cap that never applied.
+ */
+function feed(seg, audio) {
+  const verdicts = [];
+  for (let o = 0; o < audio.length; o += 320) {
+    seg.push(audio.subarray(o, Math.min(o + 320, audio.length)));
+    const v = seg.poll();
+    if (!v) continue;
+    verdicts.push(v);
+    if (v === 'final') seg.take();
+    else seg.reset();
+  }
+  return verdicts;
+}
+
+test('speech followed by silence closes exactly one utterance', () => {
+  const seg = new Segmenter({});
+  const verdicts = feed(seg, tone(1.5));
+  assert.deepStrictEqual(verdicts, [], 'should not close while someone is still talking');
+  const after = feed(seg, quiet(1.0));
+  assert.ok(after.includes('final'), 'silence after speech should close the utterance');
+});
+
+test('a buffer that never contained speech is discarded, not transcribed', () => {
+  // The reason this matters: Whisper hallucinates confidently on silence, so a
+  // decode of nothing produces a caption of something.
+  const seg = new Segmenter({});
+  const verdicts = feed(seg, quiet(4));
+  assert.ok(verdicts.includes('discard'), `got ${JSON.stringify(verdicts)}`);
+  assert.ok(!verdicts.includes('final'), 'silence must never reach the engine');
+  assert.strictEqual(seg.view(), null, 'there is nothing to hand over');
+});
+
+test('the clip keeps more audio after the last speech than before the first', () => {
+  // A word ending in a fricative trails below the energy threshold while still
+  // being part of the word. Trimming symmetrically cost the final consonant:
+  // "Americans" came back as "American".
+  const seg = new Segmenter({});
+  feed(seg, quiet(0.5));
+  feed(seg, tone(1.0));
+  feed(seg, quiet(0.5));
+  const clip = seg.view();
+  assert.ok(clip, 'expected a clip');
+  const lead = seg.firstSpeech - Math.max(0, seg.firstSpeech - seg.leadSamples);
+  const trail = Math.min(seg.len, seg.lastSpeech + seg.trailSamples) - seg.lastSpeech;
+  assert.ok(trail > lead, `trail ${trail} should exceed lead ${lead}`);
+});
+
+test('a long unbroken turn is capped rather than growing without limit', () => {
+  // Whisper cannot encode more than 30 seconds at all, and a caption nobody sees
+  // for half a minute is no use on any engine.
+  const seg = new Segmenter({ maxSeconds: 4 });
+  const verdicts = feed(seg, tone(6));
+  assert.ok(verdicts.includes('final'), 'the cap should have closed an utterance');
+  assert.ok(seg.seconds <= 4.1, `buffer grew to ${seg.seconds.toFixed(1)}s`);
+});
+
+test('the noise floor does not drift up during a long turn', () => {
+  // A symmetric average let a sustained turn drag the floor up until quiet words
+  // stopped registering as speech and the utterance closed mid-sentence.
+  const seg = new Segmenter({});
+  feed(seg, tone(8, 0.3));
+  assert.ok(seg.hasSpeech, 'eight seconds of tone should read as speech throughout');
+  const threshold = seg.noise * 3;
+  assert.ok(threshold < 0.3, `threshold climbed to ${threshold.toFixed(4)} — into the signal`);
+});
+
+test('the noise floor adapts to a genuinely noisy microphone', () => {
+  const seg = new Segmenter({});
+  feed(seg, quiet(3, 0.02)); // a hissy mic, well above the absolute floor
+  assert.ok(seg.noise > 0.005, `floor stayed at ${seg.noise.toFixed(5)} despite the hiss`);
+});
+
+// --- decode scheduling ---------------------------------------------------
+
+const { InferenceQueue } = require('../src/engine/stt/onnx');
+
+console.log('\ndecode scheduling');
+
+const defer = (ms, value) => () => new Promise((r) => setTimeout(() => r(value), ms));
+
+testAsync('finals run one at a time, in order', async () => {
+  // Several decodes at once would contend for the same cores and all miss their
+  // deadline, which is the whole reason this queue exists.
+  const queue = new InferenceQueue(1);
+  const order = [];
+  let peak = 0;
+  const job = (name) => () => {
+    peak = Math.max(peak, queue.active);
+    return defer(20)().then(() => order.push(name));
+  };
+  await Promise.all([queue.final(job('a')), queue.final(job('b')), queue.final(job('c'))]);
+  assert.deepStrictEqual(order, ['a', 'b', 'c']);
+  assert.strictEqual(peak, 1, `ran ${peak} decodes at once`);
+});
+
+testAsync('a newer partial displaces the pending one for the same speaker', async () => {
+  const queue = new InferenceQueue(1);
+  // Occupy the queue so both partials have to wait.
+  const blocking = queue.final(defer(40, 'busy'));
+  const first = queue.partial('user-1', defer(5, 'stale'));
+  const second = queue.partial('user-1', defer(5, 'fresh'));
+  assert.strictEqual(await first, null, 'the displaced partial should resolve to null');
+  assert.strictEqual(await second, 'fresh');
+  await blocking;
+});
+
+testAsync('partials for different speakers both survive', async () => {
+  const queue = new InferenceQueue(1);
+  const a = queue.partial('user-1', defer(5, 'a'));
+  const b = queue.partial('user-2', defer(5, 'b'));
+  assert.deepStrictEqual(await Promise.all([a, b]), ['a', 'b']);
+});
+
+testAsync('cancelling a speaker’s partials releases the caller', async () => {
+  const queue = new InferenceQueue(1);
+  const blocking = queue.final(defer(30, 'busy'));
+  const pending = queue.partial('user-1', defer(5, 'never'));
+  queue.cancelPartials('user-1');
+  assert.strictEqual(await pending, null);
+  await blocking;
+});
+
+test('a queue with a final waiting reports itself busy to speculative work', () => {
+  const queue = new InferenceQueue(1);
+  assert.strictEqual(queue.busy, false);
+  queue.final(defer(50, 'x'));
+  assert.strictEqual(queue.busy, true, 'a partial must not be started ahead of a final');
 });
 
 // --- CI workflows --------------------------------------------------------

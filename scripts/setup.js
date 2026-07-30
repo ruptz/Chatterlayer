@@ -1,15 +1,24 @@
 'use strict';
 /**
- * Downloads the libvosk runtime into vendor/ and a speech model into models/.
+ * Downloads a speech model into models/, and the libvosk runtime into vendor/ if
+ * the chosen model needs it.
  *
  * For source checkouts and CI only — installed builds ship the runtime and
- * download models from inside the app. CI uses `--runtime-only` to fetch just
- * the library before packaging.
+ * download models from inside the app. CI uses `--runtime-only` to fetch just the
+ * library before packaging.
  *
- *   node scripts/setup-vosk.js                  # runtime + recommended model
- *   node scripts/setup-vosk.js --model=small    # a specific model
- *   node scripts/setup-vosk.js --runtime-only   # libvosk only (used by CI)
- *   node scripts/setup-vosk.js --list           # show what's available
+ *   node scripts/setup.js                          # the recommended model
+ *   node scripts/setup.js --model=medium           # a specific model
+ *   node scripts/setup.js --model=whisper-base     # any engine
+ *   node scripts/setup.js --runtime-only           # libvosk only (used by CI)
+ *   node scripts/setup.js --list                   # show what's available
+ *
+ * Only Vosk needs a separate native runtime, and it is fetched only when the
+ * chosen model is a Vosk one. The other three engines run on onnxruntime-node,
+ * which arrives as an ordinary npm dependency with prebuilt binaries, so there is
+ * nothing to fetch for them beyond the model itself. The recommended model is a
+ * Moonshine one, so a bare `npm run setup` no longer brings libvosk down with it —
+ * use `--runtime-only` (or ask for a Vosk model) if you want it.
  */
 
 const fs = require('fs');
@@ -17,8 +26,14 @@ const path = require('path');
 const os = require('os');
 const extract = require('extract-zip');
 
-const { MODEL_CATALOG, findModel, installModel, download } = require('../src/shared/models');
-const { modelsDir, vendorDir } = require('../src/shared/paths');
+const {
+  MODEL_CATALOG,
+  findModel,
+  installModel,
+  download,
+  downloadBytes,
+} = require('../src/shared/models');
+const { modelsDir, vendorDir, formatSize } = require('../src/shared/paths');
 
 /** Official prebuilt libvosk runtimes, keyed by platform+arch. */
 const RUNTIMES = {
@@ -85,12 +100,22 @@ function findLib(dir, libName) {
 
 function listModels() {
   console.log('Available speech models:\n');
+  let engine = null;
   for (const m of MODEL_CATALOG) {
+    if (m.engine !== engine) {
+      engine = m.engine;
+      console.log(`  ${engine.toUpperCase()}`);
+    }
     const tag = m.recommended ? '  (recommended)' : '';
-    console.log(`  --model=${m.key.padEnd(7)} ${m.label}${tag}`);
-    console.log(`      ~${m.downloadMB} MB download, ~${m.ramMB} MB RAM`);
-    console.log(`      ${m.blurb}\n`);
+    console.log(`    --model=${m.key.padEnd(15)} ${m.label}${tag}`);
+    console.log(
+      `        ${formatSize(m.downloadMB)} download, ~${formatSize(m.ramMB)} RAM, ` +
+        `up to ~${m.maxSpeakers} speakers`
+    );
+    console.log(`        ${m.blurb}\n`);
   }
+  console.log('Only the Vosk models need the separate libvosk runtime; the rest run');
+  console.log('on onnxruntime-node, which "npm install" has already provided.\n');
 }
 
 async function installRuntime() {
@@ -136,9 +161,8 @@ async function main() {
   console.log(`vendor   : ${vendorDir()}`);
   console.log(`models   : ${modelsDir()}\n`);
 
-  await installRuntime();
-
   if (flag('runtime-only')) {
+    await installRuntime();
     console.log('Runtime only — skipping model download.');
     return;
   }
@@ -150,12 +174,22 @@ async function main() {
     process.exit(1);
   }
 
+  // Fetching a shared library for a model that will never call it is pure waste,
+  // and the error a Vosk model raises later says exactly how to fix it.
+  if (model.engine === 'vosk') await installRuntime();
+  else console.log(`[runtime] ${model.label} runs on ONNX Runtime — nothing to fetch.\n`);
+
   const target = path.join(modelsDir(), model.dir);
-  if (fs.existsSync(target)) {
+  if (fs.existsSync(path.join(target, 'chatterlayer-model.json'))) {
     console.log(`[model]   Already present:\n      ${target}\n`);
   } else {
     console.log(
-      `[model]   Downloading ${model.label} (~${model.downloadMB} MB, ~${model.ramMB} MB RAM)…`
+      `[model]   Downloading ${model.label} — ${formatSize(model.downloadMB)}, ` +
+        `~${formatSize(model.ramMB)} RAM, up to ~${model.maxSpeakers} speakers`
+    );
+    console.log(
+      `          ${(downloadBytes(model) / 1e6).toFixed(0)} MB over ` +
+        `${model.files ? `${model.files.length} files` : '1 archive'}…`
     );
     await installModel(model.key, modelsDir(), progress);
     console.log(`      ${target}\n`);

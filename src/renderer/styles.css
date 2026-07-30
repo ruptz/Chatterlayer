@@ -354,6 +354,13 @@ main {
   margin-bottom: 14px;
 }
 
+/* The model note turns amber when more speakers are on than it keeps up with —
+   the same colour the tally uses for a recoverable fault, because that is
+   exactly what this is: nothing is broken, but captions will start to lag. */
+.help.warn {
+  color: var(--warn);
+}
+
 .input-row {
   display: flex;
   gap: 7px;
@@ -538,6 +545,19 @@ select option {
 
 .models[hidden] {
   display: none;
+}
+
+/* Engine name above each block of models, like the strip labels on a desk. */
+.model-group {
+  padding: 8px 14px 6px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-3);
 }
 
 .model-row {
