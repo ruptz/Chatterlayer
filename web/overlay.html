@@ -110,17 +110,66 @@
 
         const stage = document.getElementById('stage');
         const offline = document.getElementById('offline');
+        const params = new URLSearchParams(location.search);
 
-        /** Live settings, replaced by the server's `hello`/`settings` messages. */
-        let settings = {
-          overlay: {
-            fontSize: 30,
-            captionLifetimeMs: 7000,
-            maxLines: 4,
-            showPartials: true,
-            showSpeakerName: true,
-          },
+        const DEFAULTS = {
+          fontSize: 30,
+          captionLifetimeMs: 7000,
+          maxLines: 4,
+          showPartials: true,
+          showSpeakerName: true,
         };
+
+        /**
+         * Per-viewer overrides, read from the query string.
+         *
+         * The host's sliders drive everyone by default, which is wrong the
+         * moment several people share one overlay: text sized for a 1080p face
+         * cam is not text sized for a full-screen gameplay scene. Anything set
+         * here wins over the host's settings and keeps winning when they change
+         * theirs mid-stream, so each streamer tunes their own browser source
+         * without touching anyone else's.
+         *
+         *   ?size=42&hold=5&lines=2&partials=0&names=0
+         */
+        function readOverrides() {
+          const out = {};
+          const num = (key, min, max) => {
+            if (!params.has(key)) return null;
+            const v = Number(params.get(key));
+            return Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : null;
+          };
+          const bool = (key) => {
+            if (!params.has(key)) return null;
+            const v = params.get(key).toLowerCase();
+            return v !== '0' && v !== 'false' && v !== 'no';
+          };
+
+          const size = num('size', 8, 200);
+          if (size !== null) out.fontSize = size;
+          // Seconds in the URL — nobody wants to type milliseconds by hand.
+          const hold = num('hold', 0.5, 120);
+          if (hold !== null) out.captionLifetimeMs = Math.round(hold * 1000);
+          const lines = num('lines', 1, 20);
+          if (lines !== null) out.maxLines = Math.round(lines);
+          const partials = bool('partials');
+          if (partials !== null) out.showPartials = partials;
+          const names = bool('names');
+          if (names !== null) out.showSpeakerName = names;
+          return out;
+        }
+
+        const overrides = readOverrides();
+
+        /** Live settings: server values, with this viewer's overrides on top. */
+        let settings = { overlay: { ...DEFAULTS, ...overrides } };
+
+        /** Fold an incoming server payload in without losing the overrides. */
+        function mergeSettings(incoming) {
+          const from = (incoming && incoming.overlay) || {};
+          settings = { overlay: { ...DEFAULTS, ...from, ...overrides } };
+          applySettings();
+        }
 
         /** userId -> element currently showing that speaker's partial text. */
         const partials = new Map();
@@ -212,9 +261,31 @@
         let ws = null;
         let retry = 0;
 
+        /** Loopback: the host's own OBS, where plain HTTP never leaves the box. */
+        function isLocalHost() {
+          const h = location.hostname;
+          return h === '127.0.0.1' || h === 'localhost' || h === '::1' || h === '';
+        }
+
         function connect() {
+          // The access key rides in this URL. If the page reached us over plain
+          // HTTP from anywhere but this machine, something has gone wrong with
+          // the tunnel — refuse rather than put the key on the wire in clear
+          // text where the network between here and Cloudflare can read it.
+          if (location.protocol !== 'https:' && !isLocalHost()) {
+            offline.classList.remove('hide');
+            offline.textContent =
+              'Chatterlayer: refusing to send the access key over an insecure connection — use the https:// link.';
+            return;
+          }
+
           const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-          ws = new WebSocket(`${proto}://${location.host}`);
+          // Carry the access key onto the socket too. Over a tunnel the upgrade
+          // is gated exactly like the page request, and the key only ever lives
+          // in this URL — so re-read it rather than storing a copy anywhere.
+          const key = params.get('k');
+          const query = key ? `?k=${encodeURIComponent(key)}` : '';
+          ws = new WebSocket(`${proto}://${location.host}/${query}`);
 
           ws.onopen = () => {
             retry = 0;
@@ -230,12 +301,8 @@
             }
             switch (msg.type) {
               case 'hello':
-                settings = msg.settings || settings;
-                applySettings();
-                return;
               case 'settings':
-                settings = msg.settings || settings;
-                applySettings();
+                mergeSettings(msg.settings);
                 return;
               case 'caption':
                 return onCaption(msg);
@@ -257,8 +324,18 @@
             }
           };
 
-          ws.onclose = () => {
+          ws.onclose = (event) => {
             offline.classList.remove('hide');
+
+            // 4401: the host rotated the access key. Retrying cannot fix that,
+            // and a browser source silently hammering a dead link forever is
+            // worse than saying what happened.
+            if (event.code === 4401) {
+              offline.textContent =
+                'Chatterlayer: this link’s access key was revoked — ask the host for a new one.';
+              return;
+            }
+
             offline.textContent = 'Chatterlayer: reconnecting…';
             // Back off gently, but keep retrying forever — OBS sources are
             // often loaded before the app is running.

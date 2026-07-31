@@ -62,6 +62,21 @@ const DEFAULTS = {
      */
     host: '127.0.0.1',
   },
+  /**
+   * Remote overlay sharing over a Cloudflare Quick Tunnel, so co-streamers can
+   * point OBS at one host's captions.
+   *
+   * `enabled` only reveals the controls — it never starts anything. The tunnel
+   * is spawned by an explicit Start and is always down on launch, so an app that
+   * otherwise talks to nothing can't quietly end up exposed to the internet
+   * because of a checkbox someone ticked weeks ago.
+   *
+   * There is deliberately no access key stored here: it is minted per tunnel
+   * session and kept in memory only — see `shareKey` in main.js.
+   */
+  share: {
+    enabled: false,
+  },
   overlay: {
     fontSize: 30,
     captionLifetimeMs: 7000,
@@ -98,6 +113,15 @@ class ConfigStore {
     this.data = mergeDefaults(this.readRaw());
     /** Decrypted token is kept in memory only. */
     this.token = this.decryptToken();
+
+    // An earlier shape of remote sharing kept its access key here. Nothing
+    // reads it now — the key is minted per tunnel session and held in memory —
+    // and `mergeDefaults` preserves unknown stored keys, so without this it
+    // would sit in a plain-text file forever. Scrub it on load.
+    if (this.data.share && 'accessToken' in this.data.share) {
+      delete this.data.share.accessToken;
+      this.save();
+    }
   }
 
   readRaw() {

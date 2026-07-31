@@ -13,7 +13,8 @@ const path = require('path');
 const { app, BrowserWindow, ipcMain, shell, clipboard } = require('electron');
 
 const { ConfigStore } = require('./config');
-const { CaptionServer } = require('./server');
+const { CaptionServer, newAccessKey } = require('./server');
+const { Tunnel } = require('./tunnel');
 const { EngineHost } = require('./engine-host');
 const { colorForUser, assignColors, PALETTE } = require('../shared/colors');
 const {
@@ -30,6 +31,7 @@ let mainWindow = null;
 let config = null;
 let server = null;
 let engine = null;
+let tunnel = null;
 
 /**
  * Collision-free colour assignment for everyone currently in the call,
@@ -131,6 +133,64 @@ function displaySettings() {
   return { overlay: config.data.overlay };
 }
 
+// -------------------------------------------------------- remote sharing ---
+
+/**
+ * The access key remote overlay links carry, for this tunnel session only.
+ *
+ * 128 bits of randomness in the URL is the whole authentication story, which is
+ * appropriate for what it protects: captions that are already going out on a
+ * public stream. It exists so a scanned or stale tunnel hostname isn't enough
+ * to watch someone's voice channel, not to hold a secret.
+ *
+ * Kept in memory and re-minted on every Start, rather than saved to config.
+ * A Quick Tunnel's hostname is random per session, so a link from the last run
+ * is already dead — persisting the key would buy nothing, and would mean
+ * writing a live credential to chatterlayer-config.json in plain text next to
+ * a bot token the OS keystore goes out of its way to encrypt. One link, one
+ * session.
+ */
+let shareKey = '';
+
+/** Everything the renderer needs to draw the sharing panel. */
+function shareState() {
+  const live = Boolean(tunnel && tunnel.url);
+  return {
+    enabled: Boolean(config.data.share.enabled),
+    running: live,
+    busy: Boolean(tunnel && tunnel.starting),
+    origin: live ? tunnel.url : '',
+    url: live ? server.shareUrl(tunnel.url) : '',
+  };
+}
+
+function sendShare(extra = {}) {
+  send('chatterlayer:event', { type: 'tunnel', ...shareState(), ...extra });
+}
+
+/** Close the tunnel and disarm the access gate. Safe to call when already down. */
+async function stopSharing(reason) {
+  if (tunnel) await tunnel.stop();
+  shareKey = '';
+  server.setAccess({ required: false });
+  sendShare(reason ? { message: reason } : {});
+}
+
+function wireTunnel() {
+  tunnel.on('status', (status) => sendShare({ phase: status.phase, progress: status }));
+
+  // cloudflared died on its own. The gate comes down with it — leaving it armed
+  // would demand a key from the host's own OBS for no reason.
+  tunnel.on('dropped', ({ code }) => {
+    shareKey = '';
+    server.setAccess({ required: false });
+    sendShare({
+      message: `The tunnel dropped (cloudflared exited, code ${code}). Start it again to get a new link.`,
+      level: 'warn',
+    });
+  });
+}
+
 function wireEngine() {
   engine.on('message', (msg) => {
     switch (msg.type) {
@@ -206,9 +266,13 @@ async function bootstrap() {
   rebuildFilter();
   server = new CaptionServer();
   engine = new EngineHost();
+  // Constructed, not started. Remote sharing is always down at launch, however
+  // the toggle was left — see the `share` block in config.js.
+  tunnel = new Tunnel(path.join(app.getPath('userData'), 'bin'));
 
   server.updateSettings(displaySettings());
   wireEngine();
+  wireTunnel();
 
   try {
     const urls = await server.start(config.data.server);
@@ -241,9 +305,66 @@ ipcMain.handle('chatterlayer:getState', () => ({
   models: listModels(),
   running: engine.running,
   discord,
+  share: shareState(),
   version: app.getVersion(),
   releasesUrl: RELEASES_PAGE,
 }));
+
+/**
+ * Arm or disarm the sharing panel. Switching it on deliberately does NOT open
+ * a tunnel — that needs an explicit Start.
+ */
+ipcMain.handle('chatterlayer:setShareEnabled', async (_e, enabled) => {
+  const on = Boolean(enabled);
+  config.update({ share: { ...config.data.share, enabled: on } });
+  if (!on && tunnel.running) await stopSharing();
+  return shareState();
+});
+
+ipcMain.handle('chatterlayer:startShare', async () => {
+  if (!config.data.share.enabled) throw new Error('Turn on remote sharing first.');
+  if (tunnel.running) return shareState();
+  // Without a bound port there is nothing to put a tunnel in front of, and
+  // cloudflared would happily point at a dead address and hand out a link.
+  if (!server.port) throw new Error('The caption server is not running — check the port setting.');
+
+  // A new key for every session, and armed before the tunnel exists rather
+  // than after: there must be no window in which the overlay is reachable from
+  // the internet without a key.
+  shareKey = newAccessKey();
+  server.setAccess({ token: shareKey, required: true });
+  sendShare({ busy: true });
+
+  try {
+    const origin = await tunnel.start({ port: server.port });
+    sendShare({ origin, url: server.shareUrl(origin) });
+    return shareState();
+  } catch (err) {
+    server.setAccess({ required: false });
+    sendShare({ message: err.message, level: 'error' });
+    throw err;
+  }
+});
+
+ipcMain.handle('chatterlayer:stopShare', async () => {
+  await stopSharing();
+  return shareState();
+});
+
+/**
+ * Mint a new key mid-session, invalidating every link already handed out. The
+ * server drops remote viewers still holding the old one rather than letting
+ * them run on until their next reconnect.
+ *
+ * Only meaningful while the tunnel is up — stopping it already discards the key.
+ */
+ipcMain.handle('chatterlayer:rotateShareToken', () => {
+  if (!tunnel.url) throw new Error('Start the tunnel before regenerating its key.');
+  shareKey = newAccessKey();
+  server.setAccess({ token: shareKey, required: true });
+  sendShare({ message: 'Access key regenerated — old links no longer work.' });
+  return shareState();
+});
 
 /**
  * Ask GitHub whether a newer release exists. Notification only — nothing is
@@ -302,6 +423,16 @@ ipcMain.handle('chatterlayer:updateConfig', async (_e, patch) => {
 
   // Changing host/port needs the server rebound.
   if (JSON.stringify(config.data.server) !== before) {
+    // A live tunnel points at the old port, so it cannot survive this. Taking
+    // it down explicitly beats leaving a link that resolves to nothing.
+    if (tunnel && tunnel.running) {
+      await stopSharing();
+      send('chatterlayer:event', {
+        type: 'log',
+        level: 'warn',
+        message: 'Port changed — remote sharing stopped. Start it again for a new link.',
+      });
+    }
     await server.stop();
     try {
       const urls = await server.start(config.data.server);
@@ -443,11 +574,20 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
+/** Guards against re-entering teardown when `app.quit()` fires again. */
+let quitting = false;
+
 app.on('before-quit', async (event) => {
-  if (engine && engine.child) {
-    event.preventDefault();
-    await engine.shutdown();
-    if (server) await server.stop();
-    app.exit(0);
-  }
+  if (quitting) return;
+  const needsTeardown = (engine && engine.child) || (tunnel && tunnel.running);
+  if (!needsTeardown) return;
+
+  quitting = true;
+  event.preventDefault();
+  // The tunnel first: it is the only part of this that is visible from outside
+  // the machine, and it must not outlive the window under any exit path.
+  if (tunnel) await tunnel.stop();
+  if (engine && engine.child) await engine.shutdown();
+  if (server) await server.stop();
+  app.exit(0);
 });

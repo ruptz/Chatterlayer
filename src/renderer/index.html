@@ -194,6 +194,61 @@
         </div>
       </section>
 
+      <!-- ---------------------------------------------- remote overlay -->
+      <section class="card">
+        <div class="card-head">
+          <h2>Remote overlay</h2>
+          <span class="meta" id="share-meta">Off</span>
+        </div>
+        <div class="card-body">
+          <label class="check">
+            <input type="checkbox" id="share-enabled" />
+            Let other streamers use these captions
+          </label>
+
+          <p class="help spaced">
+            Opens a Cloudflare tunnel so everyone co-streaming can point OBS at
+            one link, instead of each running their own bot and speech model.
+            Nothing leaves this machine until you press Start, and the tunnel is
+            always closed again when Chatterlayer starts up.
+          </p>
+
+          <div id="share-panel" hidden>
+            <div class="actions">
+              <button class="btn btn-primary" id="share-start">Start tunnel</button>
+              <button class="btn btn-danger" id="share-stop" disabled>Stop tunnel</button>
+              <span class="spacer"></span>
+              <button
+                class="btn btn-ghost btn-sm"
+                id="share-rotate"
+                title="Mints a new access key and disconnects anyone using the old link."
+              >
+                New access key
+              </button>
+            </div>
+
+            <div class="url spaced-top">
+              <span class="label">Link to share</span>
+              <code id="url-share">&mdash;</code>
+              <button class="btn btn-sm" data-copy="url-share">Copy</button>
+            </div>
+
+            <p class="help" id="share-note">
+              The link carries an access key &mdash; without it the page returns
+              401, so a guessed tunnel address gets nothing.
+            </p>
+
+            <p class="help spaced-top">
+              Each streamer can size the overlay for their own scene by adding
+              <code>&amp;size=42</code>, <code>&amp;hold=5</code> (seconds),
+              <code>&amp;lines=2</code>, <code>&amp;partials=0</code> or
+              <code>&amp;names=0</code> to their copy of the link. Those beat the
+              sliders above for that one browser source only.
+            </p>
+          </div>
+        </div>
+      </section>
+
       <!-- ------------------------------------------------------ filter -->
       <section class="card">
         <div class="card-head">

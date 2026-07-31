@@ -42,6 +42,14 @@ const el = {
   showPartials: $('show-partials'),
   showNames: $('show-names'),
   port: $('port'),
+  shareEnabled: $('share-enabled'),
+  sharePanel: $('share-panel'),
+  shareStart: $('share-start'),
+  shareStop: $('share-stop'),
+  shareRotate: $('share-rotate'),
+  shareMeta: $('share-meta'),
+  shareNote: $('share-note'),
+  urlShare: $('url-share'),
   clear: $('clear'),
   reveal: $('reveal'),
   preview: $('preview'),
@@ -68,6 +76,8 @@ let state = {
    * the dropdown. They differ whenever someone switches models mid-call.
    */
   loadedModel: '',
+  /** Remote sharing: whether the panel is armed, and the live tunnel if any. */
+  share: { enabled: false, running: false, busy: false, origin: '', url: '' },
   /** Running version and where to send someone who wants a newer one. */
   version: '',
   releasesUrl: 'https://github.com/ruptz/Chatterlayer/releases/latest',
@@ -555,6 +565,14 @@ function handleEvent(msg) {
       }
       return;
 
+    case 'tunnel': {
+      const { type, message, level, phase, progress, ...next } = msg;
+      state.share = { ...state.share, ...next };
+      renderShare({ message, level, phase, progress });
+      if (message) log(message, level || 'info');
+      return;
+    }
+
     case 'stats': {
       const bits = [];
       if (msg.speakers !== undefined) bits.push(`${msg.speakers} ch`);
@@ -890,6 +908,66 @@ async function refreshUpdate(announce = false) {
   }
 }
 
+// ---------------------------------------------------------- remote share --
+
+const SHARE_NOTE_DEFAULT =
+  'The link carries an access key — without it the page returns 401, so a ' +
+  'guessed tunnel address gets nothing.';
+
+/**
+ * Draw the sharing panel.
+ *
+ * @param {{message?: string, level?: string, phase?: string, progress?: object}} [extra]
+ *   Transient detail from the last tunnel event: a message to show, or which
+ *   step of starting up we're on.
+ */
+function renderShare(extra = {}) {
+  const s = state.share;
+
+  el.shareEnabled.checked = s.enabled;
+  el.sharePanel.hidden = !s.enabled;
+  el.shareStart.disabled = !s.enabled || s.running || s.busy;
+  el.shareStop.disabled = !s.running && !s.busy;
+  // Nothing to rotate when no tunnel is up — the key dies with the session.
+  el.shareRotate.disabled = !s.running;
+  el.urlShare.textContent = s.url || '—';
+
+  if (!s.enabled) el.shareMeta.textContent = 'Off';
+  else if (s.running) el.shareMeta.textContent = 'Sharing';
+  else if (s.busy) el.shareMeta.textContent = 'Opening…';
+  else el.shareMeta.textContent = 'Armed';
+
+  const note = el.shareNote;
+  const setNote = (text, lampState) => {
+    note.textContent = text;
+    if (lampState) note.dataset.state = lampState;
+    else delete note.dataset.state;
+  };
+
+  if (extra.message) {
+    setNote(
+      extra.message,
+      extra.level === 'error' ? 'fault' : extra.level === 'warn' ? 'working' : 'ok'
+    );
+    return;
+  }
+  if (extra.phase === 'download') {
+    // First run only — cloudflared is fetched once and kept.
+    const { received = 0, total = 0 } = extra.progress || {};
+    const pct = total ? ` ${Math.round((received / total) * 100)}%` : '';
+    setNote(`Downloading cloudflared (one time)…${pct}`, 'working');
+    return;
+  }
+  if (extra.phase === 'install') return setNote('Unpacking cloudflared…', 'working');
+  if (extra.phase === 'starting') return setNote('Asking Cloudflare for a link…', 'working');
+
+  if (s.running) {
+    setNote('Live. Anyone with this exact link sees these captions.', 'ok');
+    return;
+  }
+  setNote(SHARE_NOTE_DEFAULT);
+}
+
 async function init() {
   state = { ...state, ...(await window.chatterlayer.getState()) };
   const c = state.config;
@@ -917,6 +995,7 @@ async function init() {
   syncFaderLabels();
 
   if (state.urls && state.urls.overlay) el.urlOverlay.textContent = state.urls.overlay;
+  renderShare();
 
   renderModels();
   renderModelCatalog();
@@ -1056,6 +1135,45 @@ el.clear.addEventListener('click', async () => {
   empty.textContent = 'Cleared.';
   el.preview.appendChild(empty);
   partials.clear();
+});
+
+el.shareEnabled.addEventListener('change', async () => {
+  const on = el.shareEnabled.checked;
+  state.share = await window.chatterlayer.setShareEnabled(on);
+  renderShare();
+  log(
+    on
+      ? 'Remote overlay armed — nothing is open yet, press Start tunnel for a link.'
+      : 'Remote overlay off.'
+  );
+});
+
+el.shareStart.addEventListener('click', async () => {
+  el.shareStart.disabled = true;
+  try {
+    state.share = await window.chatterlayer.startShare();
+    renderShare();
+    log(`Remote overlay live at ${state.share.origin}`);
+  } catch (err) {
+    log(err.message, 'error');
+    renderShare({ message: err.message, level: 'error' });
+  }
+});
+
+el.shareStop.addEventListener('click', async () => {
+  el.shareStop.disabled = true;
+  state.share = await window.chatterlayer.stopShare();
+  renderShare();
+  log('Remote overlay stopped — the shared link is dead.');
+});
+
+el.shareRotate.addEventListener('click', async () => {
+  try {
+    state.share = await window.chatterlayer.rotateShareToken();
+    renderShare();
+  } catch (err) {
+    log(err.message, 'error');
+  }
 });
 
 el.reveal.addEventListener('click', () => window.chatterlayer.revealConfig());

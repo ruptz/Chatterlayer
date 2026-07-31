@@ -1025,6 +1025,10 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   flex: none;
 }
 
+.spaced-top {
+  margin-top: 14px;
+}
+
 .url code {
   flex: 1;
   min-width: 0;

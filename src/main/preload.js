@@ -17,6 +17,11 @@ contextBridge.exposeInMainWorld('chatterlayer', {
   setAlias: (userId, alias) => ipcRenderer.invoke('chatterlayer:setAlias', { userId, alias }),
   clearCaptions: () => ipcRenderer.invoke('chatterlayer:clearCaptions'),
 
+  setShareEnabled: (on) => ipcRenderer.invoke('chatterlayer:setShareEnabled', on),
+  startShare: () => ipcRenderer.invoke('chatterlayer:startShare'),
+  stopShare: () => ipcRenderer.invoke('chatterlayer:stopShare'),
+  rotateShareToken: () => ipcRenderer.invoke('chatterlayer:rotateShareToken'),
+
   modelCatalog: () => ipcRenderer.invoke('chatterlayer:modelCatalog'),
   installModel: (key) => ipcRenderer.invoke('chatterlayer:installModel', key),
   removeModel: (key) => ipcRenderer.invoke('chatterlayer:removeModel', key),

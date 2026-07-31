@@ -1076,6 +1076,484 @@ test('the check interval is a day, not a launch', () => {
   assert.strictEqual(CHECK_INTERVAL_MS, 24 * 60 * 60 * 1000);
 });
 
+// --- remote sharing ------------------------------------------------------
+
+console.log('\nremote sharing');
+
+const http = require('http');
+const vm = require('vm');
+const WebSocket = require('ws');
+const { CaptionServer, newAccessKey } = require('../src/main/server');
+const { assetFor } = require('../src/main/tunnel');
+
+/**
+ * A caption server on an ephemeral port, torn down afterwards. Each test gets
+ * its own so they can run concurrently without fighting over the access gate.
+ */
+async function withServer(access, fn) {
+  const server = new CaptionServer();
+  await server.start({ port: 0, host: '127.0.0.1' });
+  if (access) server.setAccess(access);
+  try {
+    return await fn(server);
+  } finally {
+    await server.stop();
+  }
+}
+
+/** Headers a request forwarded by cloudflared actually carries. */
+const REMOTE = {
+  host: 'random-words.trycloudflare.com',
+  'cf-ray': '8ab0000000000000-LHR',
+  'cf-connecting-ip': '203.0.113.7',
+};
+const localHeaders = (port) => ({ host: `127.0.0.1:${port}` });
+
+function status(port, reqPath, headers) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      { host: '127.0.0.1', port, path: reqPath, method: 'GET', headers },
+      (res) => {
+        res.resume();
+        resolve(res.statusCode);
+      }
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+function socketOpens(port, reqPath, headers) {
+  return new Promise((resolve) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}${reqPath}`, { headers });
+    const done = (r) => {
+      try {
+        ws.close();
+      } catch {
+        /* already closing */
+      }
+      resolve(r);
+    };
+    ws.on('open', () => done(true));
+    ws.on('error', () => done(false));
+    setTimeout(() => done(false), 4000);
+  });
+}
+
+testAsync('with sharing off the overlay is served to OBS without a key', async () => {
+  await withServer(null, async (s) => {
+    assert.strictEqual(await status(s.port, '/overlay', localHeaders(s.port)), 200);
+    assert.strictEqual(await socketOpens(s.port, '/', localHeaders(s.port)), true);
+  });
+});
+
+testAsync('with sharing on a remote request without the key gets nothing', async () => {
+  await withServer({ token: 'sekret', required: true }, async (s) => {
+    assert.strictEqual(await status(s.port, '/overlay', REMOTE), 401);
+    assert.strictEqual(await status(s.port, '/overlay?k=', REMOTE), 401);
+    assert.strictEqual(await status(s.port, '/overlay?k=wrong', REMOTE), 401);
+    assert.strictEqual(await socketOpens(s.port, '/', REMOTE), false);
+  });
+});
+
+testAsync('a wrong key is refused as firmly as no key at all', async () => {
+  // "Missing" is the easy case. These are the near-misses: a truncated key, a
+  // key with something appended, the right key under the wrong parameter name.
+  const key = 'Xk3pQ7rTvB2nL9wYzA4hMg';
+  await withServer({ token: key, required: true }, async (s) => {
+    const refused = [
+      '/overlay?k=hunter2',
+      `/overlay?k=${key.slice(0, 12)}`,
+      `/overlay?k=${key.slice(0, -1)}`,
+      `/overlay?k=${key}x`,
+      `/overlay?k=${key.toLowerCase()}`,
+      `/overlay?k=${key}%20`,
+      `/overlay?K=${key}`,
+      `/overlay?key=${key}`,
+      // Parameter pollution: the first k wins, so a bad one cannot be rescued
+      // by appending a good one.
+      `/overlay?k=nope&k=${key}`,
+      '/overlay?size=40&k=nope',
+    ];
+    // Each attempt comes from its own address: this is about how a bad key is
+    // judged, and twenty misses from one caller would (correctly) trip the
+    // rate limiter and mask the answer. Throttling has its own test below.
+    let n = 0;
+    for (const p of refused) {
+      const who = { ...REMOTE, 'cf-connecting-ip': `203.0.113.${++n}` };
+      assert.strictEqual(await status(s.port, p, who), 401, `should be refused: ${p}`);
+      assert.strictEqual(await socketOpens(s.port, p, who), false, `ws should refuse: ${p}`);
+    }
+    // ...and the genuine article still works, with overrides attached.
+    assert.strictEqual(await status(s.port, `/overlay?k=${key}&size=40`, REMOTE), 200);
+  });
+});
+
+testAsync('the right key gets both the page and the caption socket', async () => {
+  await withServer({ token: 'sekret', required: true }, async (s) => {
+    assert.strictEqual(await status(s.port, '/overlay?k=sekret', REMOTE), 200);
+    assert.strictEqual(await socketOpens(s.port, '/?k=sekret', REMOTE), true);
+  });
+});
+
+testAsync('the host’s own OBS keeps working while sharing is on', async () => {
+  await withServer({ token: 'sekret', required: true }, async (s) => {
+    assert.strictEqual(await status(s.port, '/overlay', localHeaders(s.port)), 200);
+    assert.strictEqual(await socketOpens(s.port, '/', localHeaders(s.port)), true);
+  });
+});
+
+testAsync('a spoofed loopback Host cannot get past the key', async () => {
+  // Anyone can set Host on a request to the tunnel, so the loopback exemption
+  // must not rest on it alone — Cloudflare's own headers settle it.
+  await withServer({ token: 'sekret', required: true }, async (s) => {
+    const spoofed = { ...localHeaders(s.port), 'cf-ray': '8ab', 'cf-connecting-ip': '203.0.113.7' };
+    assert.strictEqual(await status(s.port, '/overlay', spoofed), 401);
+    assert.strictEqual(await socketOpens(s.port, '/', spoofed), false);
+  });
+});
+
+testAsync('rotating the key cuts off remote viewers but not the host', async () => {
+  await withServer({ token: 'old', required: true }, async (s) => {
+    const remote = new WebSocket(`ws://127.0.0.1:${s.port}/?k=old`, { headers: REMOTE });
+    const host = new WebSocket(`ws://127.0.0.1:${s.port}/`, { headers: localHeaders(s.port) });
+    await Promise.all([
+      new Promise((r) => remote.on('open', r)),
+      new Promise((r) => host.on('open', r)),
+    ]);
+
+    const kicked = new Promise((r) => remote.on('close', (code) => r(code)));
+    let hostDropped = false;
+    host.on('close', () => (hostDropped = true));
+
+    s.setAccess({ token: 'new', required: true });
+
+    assert.strictEqual(await kicked, 4401, 'remote viewer should be told why');
+    await new Promise((r) => setTimeout(r, 150));
+    assert.strictEqual(hostDropped, false, 'the host’s own overlay must survive');
+    assert.strictEqual(await status(s.port, '/overlay?k=old', REMOTE), 401);
+    assert.strictEqual(await status(s.port, '/overlay?k=new', REMOTE), 200);
+    host.close();
+  });
+});
+
+/** Open a socket and keep it, so connection caps can actually be reached. */
+function openSocket(port, reqPath, headers) {
+  return new Promise((resolve) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}${reqPath}`, { headers });
+    ws.on('open', () => resolve(ws));
+    ws.on('error', () => resolve(null));
+    setTimeout(() => resolve(null), 4000);
+  });
+}
+
+const remoteFrom = (ip) => ({ ...REMOTE, 'cf-connecting-ip': ip });
+
+testAsync('repeated failures are throttled, per caller', async () => {
+  // The key is 128 bits, so this is not a brute-force defence — it stops a
+  // scanner burning a streamer's sockets and CPU mid-broadcast.
+  await withServer({ token: 'sekret', required: true }, async (s) => {
+    const attacker = remoteFrom('203.0.113.50');
+    const codes = [];
+    for (let i = 0; i < 25; i++) codes.push(await status(s.port, `/overlay?k=g${i}`, attacker));
+
+    assert.ok(codes.slice(0, 20).every((c) => c === 401), 'first 20 should be plain refusals');
+    assert.ok(codes.slice(20).every((c) => c === 429), 'the rest should be throttled');
+    // Once throttled, even the real key waits — no oracle for "that one was right".
+    assert.strictEqual(await status(s.port, '/overlay?k=sekret', attacker), 429);
+    assert.strictEqual(await socketOpens(s.port, '/?k=sekret', attacker), false);
+
+    // Everyone else is unaffected, including the host.
+    assert.strictEqual(await status(s.port, '/overlay?k=sekret', remoteFrom('198.51.100.9')), 200);
+    assert.strictEqual(await status(s.port, '/overlay', localHeaders(s.port)), 200);
+  });
+});
+
+testAsync('a correct key clears the failure count', async () => {
+  await withServer({ token: 'sekret', required: true }, async (s) => {
+    const clumsy = remoteFrom('198.51.100.22');
+    for (let i = 0; i < 15; i++) await status(s.port, '/overlay?k=typo', clumsy);
+    assert.strictEqual(await status(s.port, '/overlay?k=sekret', clumsy), 200);
+    // Counter reset, so another run of near-misses is tolerated rather than
+    // leaving a co-streamer locked out for a minute over one bad paste.
+    for (let i = 0; i < 19; i++) await status(s.port, '/overlay?k=typo', clumsy);
+    assert.strictEqual(await status(s.port, '/overlay?k=sekret', clumsy), 200);
+  });
+});
+
+testAsync('simultaneous remote viewers are capped, but the host never is', async () => {
+  await withServer({ token: 'sekret', required: true }, async (s) => {
+    const held = [];
+    for (let i = 0; i < s.maxRemoteClients; i++) {
+      held.push(await openSocket(s.port, '/?k=sekret', remoteFrom(`198.51.100.${i}`)));
+    }
+    assert.ok(held.every(Boolean), 'every viewer up to the cap should connect');
+    assert.strictEqual(
+      await openSocket(s.port, '/?k=sekret', remoteFrom('198.51.100.99')),
+      null,
+      'one past the cap must be refused'
+    );
+
+    // Flooding the tunnel must never cost the host their own overlay.
+    const host = await openSocket(s.port, '/', localHeaders(s.port));
+    assert.ok(host, 'the host must get in even at the cap');
+
+    held.forEach((w) => w && w.close());
+    host.close();
+    await new Promise((r) => setTimeout(r, 300));
+    const after = await openSocket(s.port, '/?k=sekret', remoteFrom('198.51.100.98'));
+    assert.ok(after, 'a slot should free up when a viewer leaves');
+    after.close();
+  });
+});
+
+testAsync('the caption feed is read-only and rejects oversized frames', async () => {
+  await withServer({ token: 'sekret', required: true }, async (s) => {
+    const viewer = await openSocket(s.port, '/?k=sekret', REMOTE);
+    viewer.send(JSON.stringify({ type: 'settings', settings: { overlay: { fontSize: 999 } } }));
+    viewer.send(JSON.stringify({ type: 'clear' }));
+    await new Promise((r) => setTimeout(r, 200));
+
+    // A viewer is a viewer. Nothing it sends may reach settings, the engine or
+    // the stream — the link grants watching, never controlling.
+    assert.strictEqual(s.settings.overlay.fontSize, undefined, 'client input changed server state');
+    assert.strictEqual(s.wss.listenerCount('message'), 0, 'nothing should act on inbound frames');
+
+    const closed = new Promise((r) => viewer.on('close', (code) => r(code)));
+    viewer.send(Buffer.alloc(64 * 1024));
+    assert.strictEqual(await closed, 1009, 'an oversized frame should close the socket');
+  });
+});
+
+testAsync('nothing outside web/ can be read, including sibling directories', async () => {
+  await withServer(null, async (s) => {
+    const local = localHeaders(s.port);
+    assert.strictEqual(await status(s.port, '/../package.json', local), 403);
+    assert.strictEqual(await status(s.port, '/..%2fpackage.json', local), 403);
+    // A bare startsWith check would let "web-evil" satisfy the "web" prefix.
+    assert.strictEqual(await status(s.port, '/../web-evil/x.html', local), 403);
+  });
+});
+
+test('the share link carries the key, and there is no link without one', () => {
+  const s = new CaptionServer();
+  assert.strictEqual(s.shareUrl('https://x.trycloudflare.com'), null);
+  s.setAccess({ token: 'a+b/c', required: true });
+  assert.strictEqual(
+    s.shareUrl('https://x.trycloudflare.com/'),
+    'https://x.trycloudflare.com/overlay?k=a%2Bb%2Fc'
+  );
+});
+
+test('access keys are unguessable and never repeat', () => {
+  const keys = new Set();
+  for (let i = 0; i < 500; i++) keys.add(newAccessKey());
+  assert.strictEqual(keys.size, 500, 'keys must not collide');
+  for (const k of keys) {
+    // 16 random bytes as base64url: 22 chars, no padding, URL-safe throughout.
+    assert.match(k, /^[A-Za-z0-9_-]{22}$/, `bad key shape: ${k}`);
+  }
+});
+
+test('the access key is never written to disk', () => {
+  const src = path.join(__dirname, '..', 'src', 'main');
+  const config = fs.readFileSync(path.join(src, 'config.js'), 'utf8');
+  const main = fs.readFileSync(path.join(src, 'main.js'), 'utf8');
+
+  // The key lives for one tunnel session and stays in memory. Persisting it
+  // would put a live credential in plain text beside a bot token the OS
+  // keystore encrypts, and would buy nothing: the tunnel hostname is random
+  // per session, so last run's link is already dead.
+  const share = config.match(/share:\s*\{[\s\S]*?\n {2}\}/);
+  assert.ok(share, 'config has no share block');
+  assert.ok(!/accessToken|shareKey|key/i.test(share[0]), 'no key may be stored in config');
+  assert.ok(
+    !/config\.update\([^)]*shareKey/s.test(main),
+    'the key must never be written back to config'
+  );
+  // Every Start mints a fresh one rather than reusing whatever was around.
+  const start = main.match(/startShare[\s\S]*?\n\}\);/);
+  assert.ok(/shareKey = newAccessKey\(\)/.test(start[0]), 'Start must mint a new key');
+  // And stopping discards it.
+  const stop = main.match(/async function stopSharing[\s\S]*?\n}/);
+  assert.ok(/shareKey = ''/.test(stop[0]), 'stopping must discard the key');
+
+  // mergeDefaults keeps stored-only keys, so dropping the field from DEFAULTS
+  // is not enough on its own — a key written by an earlier build has to be
+  // actively scrubbed or it outlives the feature that wrote it.
+  assert.ok(
+    /delete this\.data\.share\.accessToken/.test(config),
+    'a key left on disk by an earlier build must be cleared on load'
+  );
+});
+
+test('sharing is off by default and the launch path never starts it', () => {
+  const src = path.join(__dirname, '..', 'src', 'main');
+  const config = fs.readFileSync(path.join(src, 'config.js'), 'utf8');
+  const main = fs.readFileSync(path.join(src, 'main.js'), 'utf8');
+
+  const share = config.match(/share:\s*\{[\s\S]*?\n {2}\}/);
+  assert.ok(share, 'config has no share block');
+  assert.ok(/enabled:\s*false/.test(share[0]), 'sharing must default to off');
+
+  // The promise this feature makes: a tunnel only ever opens because someone
+  // pressed Start. Nothing on the launch path may call into it.
+  const bootstrap = main.match(/async function bootstrap\(\)[\s\S]*?\n}/);
+  assert.ok(bootstrap, 'bootstrap not found');
+  assert.ok(
+    !/tunnel\.start/.test(bootstrap[0]),
+    'bootstrap must not start the tunnel'
+  );
+  assert.ok(
+    /tunnel\.stop|stopSharing/.test(main.match(/before-quit[\s\S]*?\n}\);/)[0]),
+    'quitting must close the tunnel'
+  );
+});
+
+test('the keyed link never reaches the log panel', () => {
+  // The Log panel is what people screenshot into GitHub issues. The bare
+  // tunnel hostname there is harmless; the key beside it would not be.
+  const js = fs.readFileSync(
+    path.join(__dirname, '..', 'src', 'renderer', 'renderer.js'),
+    'utf8'
+  );
+  for (const [line] of js.matchAll(/^.*\bshare\.url\b.*$/gm)) {
+    assert.ok(!/\blog\(/.test(line), `the keyed link must not be logged: ${line.trim()}`);
+  }
+  assert.ok(
+    /log\(`Remote overlay live at \$\{state\.share\.origin\}`\)/.test(js),
+    'the "live" message should log the bare origin, not the keyed link'
+  );
+
+  // cloudflared only ever learns the hostname — the key is appended by us —
+  // so its captured output cannot carry one into an error message.
+  const tunnel = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'tunnel.js'), 'utf8');
+  assert.ok(!/accessToken|shareKey|KEY_PARAM|[?&]k=/.test(tunnel), 'the tunnel must never see the key');
+});
+
+test('every platform maps to a cloudflared build, or to none at all', () => {
+  assert.strictEqual(assetFor('win32', 'x64').name, 'cloudflared-windows-amd64.exe');
+  // Cloudflare ships no windows/arm64 build; amd64 runs under emulation.
+  assert.strictEqual(assetFor('win32', 'arm64').name, 'cloudflared-windows-amd64.exe');
+  assert.strictEqual(assetFor('darwin', 'arm64').name, 'cloudflared-darwin-arm64.tgz');
+  assert.strictEqual(assetFor('darwin', 'arm64').archive, 'tgz');
+  assert.strictEqual(assetFor('linux', 'arm64').name, 'cloudflared-linux-arm64');
+  assert.strictEqual(assetFor('linux', 'x64').archive, null);
+  assert.strictEqual(assetFor('sunos', 'x64'), null);
+});
+
+// --- overlay query overrides ---------------------------------------------
+
+console.log('\noverlay overrides');
+
+/**
+ * Run overlay.html's inline script against a stub DOM. It is the only code in
+ * the project that never runs in the app itself, so nothing else would catch a
+ * break in it.
+ */
+function runOverlay(search, where = { protocol: 'https:', host: 'abc.trycloudflare.com' }) {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'web', 'overlay.html'), 'utf8');
+  const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+
+  const stub = () => {
+    const node = {
+      children: [],
+      dataset: {},
+      style: { props: {}, setProperty: (k, v) => (node.style.props[k] = v) },
+      classList: { add() {}, remove() {} },
+      textContent: '',
+      isConnected: true,
+      appendChild: (c) => (node.children.push(c), c),
+      remove() {},
+      replaceWith() {},
+      set innerHTML(_v) {
+        node.children.length = 0;
+      },
+      get firstChild() {
+        return node.children[0];
+      },
+    };
+    return node;
+  };
+
+  const root = stub();
+  const sockets = [];
+  const sandbox = {
+    setTimeout,
+    clearTimeout,
+    URLSearchParams,
+    document: { documentElement: root, getElementById: stub, createElement: stub },
+    location: {
+      protocol: where.protocol,
+      host: where.host,
+      hostname: where.host.replace(/:\d+$/, ''),
+      search,
+    },
+    WebSocket: class {
+      constructor(url) {
+        this.url = url;
+        sockets.push(this);
+      }
+      close() {}
+    },
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(script, sandbox);
+
+  return {
+    /** null when the page refused to open a socket at all. */
+    wsUrl: sockets.length ? sockets[0].url : null,
+    /** Push settings from the host, read back the size actually applied. */
+    push(overlay) {
+      sockets[0].onmessage({ data: JSON.stringify({ type: 'settings', settings: { overlay } }) });
+      return root.style.props['--size'];
+    },
+  };
+}
+
+test('the access key is carried onto the caption socket', () => {
+  assert.strictEqual(runOverlay('?k=abc123').wsUrl, 'wss://abc.trycloudflare.com/?k=abc123');
+  assert.strictEqual(runOverlay('?k=a%2Bb').wsUrl, 'wss://abc.trycloudflare.com/?k=a%2Bb');
+  assert.strictEqual(runOverlay('').wsUrl, 'wss://abc.trycloudflare.com/');
+});
+
+test('the key is never sent over an insecure remote connection', () => {
+  const http = { protocol: 'http:', host: 'abc.trycloudflare.com' };
+  assert.strictEqual(
+    runOverlay('?k=abc123', http).wsUrl,
+    null,
+    'a plain-HTTP remote page must not open a socket carrying the key'
+  );
+  // The host's own OBS is plain HTTP by design and never leaves the machine.
+  assert.strictEqual(
+    runOverlay('', { protocol: 'http:', host: '127.0.0.1:8777' }).wsUrl,
+    'ws://127.0.0.1:8777/'
+  );
+  assert.strictEqual(
+    runOverlay('', { protocol: 'http:', host: 'localhost:8777' }).wsUrl,
+    'ws://localhost:8777/'
+  );
+});
+
+test('the host drives styling when a viewer overrides nothing', () => {
+  assert.strictEqual(runOverlay('?k=x').push({ fontSize: 52 }), '52px');
+});
+
+test('a viewer’s own size survives the host changing theirs', () => {
+  // The point of the overrides: four people sharing one overlay each need it
+  // sized for their own scene, and the host must not be able to stomp that.
+  const viewer = runOverlay('?k=x&size=18');
+  assert.strictEqual(viewer.push({ fontSize: 52 }), '18px');
+  assert.strictEqual(viewer.push({ fontSize: 64 }), '18px');
+});
+
+test('override values are clamped and junk is ignored', () => {
+  assert.strictEqual(runOverlay('?size=9999').push({ fontSize: 30 }), '200px');
+  assert.strictEqual(runOverlay('?size=0').push({ fontSize: 30 }), '8px');
+  assert.strictEqual(runOverlay('?size=big').push({ fontSize: 30 }), '30px');
+  assert.strictEqual(runOverlay('?nonsense=1').push({ fontSize: 30 }), '30px');
+});
+
 // --- result --------------------------------------------------------------
 
 Promise.all(pending).then(() => {

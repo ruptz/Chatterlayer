@@ -25,6 +25,7 @@ it doesn't even need an internet connection to caption.
 **Using it**
 
 - [On stream](#on-stream) — who gets captioned, names, colours, caption style
+- [Sharing captions with your co-streamers](#sharing-captions-with-your-co-streamers)
 - [Consent — read this one](#consent--read-this-one)
 - [The word filter](#the-word-filter)
 - [How good are the captions, really?](#how-good-are-the-captions-really)
@@ -286,6 +287,112 @@ is producing gibberish, or that the model is mishearing a name badly.
 
 The **Log** panel underneath shows connection state and any errors. That's the
 first place to look if something's not working.
+
+---
+
+## Sharing captions with your co-streamers
+
+When four people in the same call are all live, you don't need four copies of
+Chatterlayer. One person runs it; everyone else points OBS at a link.
+
+That saves the others a bot, a speech model and the CPU to run it — and it means
+every stream shows the *same* captions instead of four slightly different
+transcriptions of the same conversation.
+
+**This is off by default and never starts on its own.** Chatterlayer is offline
+software and stays that way unless you deliberately do this, every time:
+
+1. Open **Remote overlay** and tick *Let other streamers use these captions*.
+   Nothing has opened yet — this only reveals the controls.
+2. Press **Start tunnel**. The first time, Chatterlayer downloads
+   [cloudflared](https://github.com/cloudflare/cloudflared) (~35 MB, kept for
+   next time). If you already have `cloudflared` on your PATH, that one is used.
+3. Copy the link it gives you and send it to your co-streamers. They paste it
+   into a **Browser** source in OBS, exactly like the local one.
+
+Press **Stop tunnel**, or just close Chatterlayer, and the link dies. The tunnel
+is always closed again the next time the app starts, however you left the tick
+box.
+
+### The access key
+
+The link looks like this — the `?k=` part is an access key:
+
+```
+https://calm-river-quiet-1f4c.trycloudflare.com/overlay?k=Xk3pQ7rTvB2nL9wYzA4hMg
+```
+
+Without a valid key the page returns **401** and the caption feed refuses the
+connection. A wrong key is refused exactly as firmly as no key — a truncated
+one, one with characters appended, or the right value under a different
+parameter name all get 401. Treat the link like a password: anyone you send it
+to can watch your voice channel's captions for as long as the tunnel is up.
+
+**One link, one session.** The key is generated fresh every time you press Start
+and only ever exists in memory — it is never written to your config file. Stop
+the tunnel, or close Chatterlayer, and it's gone for good. There is nothing to
+clean up later and no old key sitting on disk; last week's link is dead twice
+over, since the tunnel hostname was random too.
+
+**New access key** mints a replacement mid-stream and immediately disconnects
+anyone using the old link. That's the case it's for — cutting someone off while
+you're still live. (It's only available while the tunnel is up; stopping already
+throws the key away.)
+
+Your own local OBS source is never affected by any of this:
+`http://127.0.0.1:8777/overlay` keeps working with no key.
+
+### What else guards the link
+
+| | |
+|---|---|
+| **Key strength** | 128 bits from `crypto.randomBytes` — a CSPRNG, never `Math.random()` — as 22 URL-safe characters |
+| **Comparison** | SHA-256 then `timingSafeEqual`, so a near-miss leaks nothing through timing |
+| **Rate limiting** | 20 failed attempts per caller per minute, then `429` for a minute. A correct key resets the count. Keyed on Cloudflare's `cf-connecting-ip`, which the caller cannot forge |
+| **Connection cap** | 16 simultaneous remote viewers. Your own OBS is never counted and never refused, so flooding the tunnel can't cost you your own overlay |
+| **Transport** | The overlay refuses to open the caption feed if the page arrived over plain HTTP from anywhere but this machine, so the key is never put on the wire in clear text |
+| **Read-only** | The caption feed is one-directional. The server registers no handler for inbound messages, and frames over 1 KB close the socket. A link grants watching, never controlling |
+| **Logging** | The Log panel records the bare tunnel hostname, never the keyed link — safe to screenshot into a bug report |
+
+Rate limiting is there to stop a scanner wasting your CPU mid-stream, not to
+stop key guessing: at 128 bits, guessing was never the realistic attack.
+
+### Each streamer can size it for their own scene
+
+The host's sliders are the default for everyone, which is rarely what you want
+when one person has a full-screen gameplay scene and another has a big face cam.
+Anyone can override the styling for **their** browser source by adding
+parameters to the end of their copy of the link:
+
+| Add | Does |
+|---|---|
+| `&size=42` | Text size in px (8–200) |
+| `&hold=5` | Seconds a caption stays up (0.5–120) |
+| `&lines=2` | How many captions are visible at once (1–20) |
+| `&partials=0` | Finished lines only — no live in-progress text |
+| `&names=0` | Hide speaker names |
+
+For example:
+
+```
+https://calm-river-quiet-1f4c.trycloudflare.com/overlay?k=Xk3pQ7rTvB2nL9wYzA4hMg&size=44&lines=2
+```
+
+These stick even when the host moves their own sliders mid-stream, and they
+affect nobody else.
+
+### What to know before you rely on it
+
+- **The link changes every time you start the tunnel.** Quick Tunnels get a
+  random hostname, so your co-streamers re-paste after you restart Chatterlayer.
+  Sort it out before you go live, not during.
+- **Cloudflare makes no uptime promise** for Quick Tunnels. They're free and
+  need no Cloudflare account or domain, and that's the trade.
+- **Audio still never leaves your machine.** What goes through the tunnel is the
+  finished caption text — the same words already on your stream — and nothing
+  else. Recognition is still entirely local.
+- **Changing the port stops the tunnel**, since the old link would point at
+  nothing. Start it again for a new one.
 
 ---
 
@@ -892,18 +999,19 @@ come from the catalogue entry.
 ```
 src/
   main/       Electron main process — window, config, server, engine supervisor
+    tunnel.js   Optional Cloudflare Quick Tunnel (opt-in, never auto-started)
   engine/     Discord bot, Opus decode, resampling, speech worker
     stt/      The four speech engines and everything they share
   renderer/   Control panel UI
   shared/     Colour hashing, model catalogue, path resolution, word filter
 web/
-  overlay.html    OBS browser source
+  overlay.html    OBS browser source (reads per-viewer overrides from its URL)
 scripts/
   setup.js        Downloads a model (+ the libvosk runtime if it needs one)
   test-stt.js     Transcribe a WAV with any installed model
   test-vosk.js    Vosk-only variant, exercises the FFI binding directly
   bench.js        RAM, CPU and caption-latency report
-  selftest.js     Audio, DSP, tokeniser, segmentation, colour and wiring tests
+  selftest.js     Audio, DSP, tokeniser, segmentation, colour, sharing and wiring tests
 ```
 
 Inside `src/engine/stt/`:
